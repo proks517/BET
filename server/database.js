@@ -42,7 +42,7 @@ function getPredictions(db, limit = 100) {
 }
 
 function updateResult(db, id, result, odds) {
-  const stake = 10
+  const stake = 10 // flat stake per spec — matches schema DEFAULT 10
   let pnl = null
   if (result === 'win' && odds != null) {
     pnl = Math.round(((odds * stake) - stake) * 100) / 100

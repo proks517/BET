@@ -93,6 +93,9 @@ app.get('/api/predictions', (req, res) => {
 // PATCH /api/predictions/:id
 app.patch('/api/predictions/:id', (req, res) => {
   const id = parseInt(req.params.id, 10)
+  if (!Number.isInteger(id) || id < 1) {
+    return res.status(400).json({ error: 'id must be a positive integer' })
+  }
   const { result, odds } = req.body
   if (!result || !['win', 'loss', 'scratched'].includes(result)) {
     return res.status(400).json({ error: 'result must be win, loss, or scratched' })

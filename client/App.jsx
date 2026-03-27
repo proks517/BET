@@ -8,7 +8,7 @@ const SOURCES = {
 }
 
 function todayStr() {
-  return new Date().toISOString().split('T')[0]
+  return new Date().toLocaleDateString('en-CA') // YYYY-MM-DD in local time
 }
 
 function App() {
