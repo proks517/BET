@@ -1,0 +1,31 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(npm install:*)",
+      "Bash(node -e \"console.log\\(''✓ Express:'', require\\(''express''\\).version\\); console.log\\(''✓ Cheerio:'', require\\(''cheerio''\\).version\\); console.log\\(''✓ Puppeteer:'', require\\(''puppeteer/package.json''\\).version\\);\")",
+      "Bash(node -e \"try { require\\(''better-sqlite3''\\); console.log\\(''✓ better-sqlite3 loaded''\\); } catch\\(e\\) { console.log\\(''✗ better-sqlite3 not available:'', e.message.split\\(''\\\\n''\\)[0]\\); }\")",
+      "Bash(npm run:*)",
+      "Bash(npm ls:*)",
+      "Bash(git -C \"C:/Users/marsh/OneDrive/Documents/PROJECTS/BET/raceedge\" log --oneline)",
+      "Bash(grep -E \"\\(test|fixtures\\)$\")",
+      "Bash(npm rebuild:*)",
+      "Bash(npm cache:*)",
+      "Bash(npm uninstall:*)",
+      "Bash(git -C \"C:/Users/marsh/OneDrive/Documents/PROJECTS/BET/raceedge\" log --oneline -5)",
+      "Bash(node -e \":*)",
+      "Bash(ls -la /c/Users/marsh/OneDrive/Documents/PROJECTS/BET/raceedge/server/*.js)",
+      "Bash(npm test:*)",
+      "Bash(curl -s http://localhost:3001/api/stats)",
+      "Bash(curl -s \"http://localhost:3001/api/meetings?date=2026-03-20&type=greyhound\")",
+      "Bash(curl -s \"http://localhost:3001/api/races?meeting=Sandown+Park\")",
+      "Bash(curl -s -X POST -H \"Content-Type: application/json\" -d '{\"\"date\"\":\"\"2026-03-20\"\",\"\"meeting\"\":\"\"Sandown Park\"\",\"\"raceNumber\"\":1,\"\"raceType\"\":\"\"greyhound\"\",\"\"mode\"\":\"\"safest\"\"}' http://localhost:3001/api/research)",
+      "Bash(curl -s http://localhost:3001/api/predictions)",
+      "Bash(curl -s -X PATCH -H \"Content-Type: application/json\" -d '{\"\"result\"\":\"\"win\"\",\"\"odds\"\":3.50}' http://localhost:3001/api/predictions/999)",
+      "Bash(kill %1)",
+      "Bash(taskkill /F /IM node.exe)",
+      "Bash(npx vite:*)",
+      "Bash(git -C \"C:/Users/marsh/OneDrive/Documents/PROJECTS/BET/raceedge\" log --oneline fad1f49..4ccdfb3)",
+      "Bash(git -C \"C:/Users/marsh/OneDrive/Documents/PROJECTS/BET/raceedge\" diff --stat fad1f49..4ccdfb3)"
+    ]
+  }
+}
