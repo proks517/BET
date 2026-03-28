@@ -3,6 +3,7 @@
   "version": "1.0.0",
   "description": "Australian racing research and prediction tracker",
   "scripts": {
+    "start": "node server/index.js",
     "dev": "concurrently \"npm run server\" \"npm run client\"",
     "server": "node --watch server/index.js",
     "client": "vite",

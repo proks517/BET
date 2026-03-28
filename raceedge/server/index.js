@@ -1,5 +1,6 @@
 const express = require('express')
 const cors    = require('cors')
+const path    = require('path')
 const { initDb, savePrediction, getPredictions, updateResult, getStats } = require('./database.js')
 const { research, fetchMeetings, closeBrowser } = require('./scraper.js')
 const { applyMode } = require('./predictor.js')
@@ -7,11 +8,25 @@ const { applyMode } = require('./predictor.js')
 const app  = express()
 const PORT = process.env.PORT || 3001
 
-app.use(cors({ origin: 'http://localhost:5173' }))
+const CORS_ORIGIN = process.env.CORS_ORIGIN || 'http://localhost:5173'
+app.use(cors({ origin: CORS_ORIGIN === '*' ? true : CORS_ORIGIN }))
 app.use(express.json())
+
+if (process.env.NODE_ENV === 'production') {
+  app.use(express.static(path.join(__dirname, '..', 'dist')))
+}
 
 const db = initDb()
 console.log('[RaceEdge] Database ready')
+
+app.get('/api/health', (req, res) => {
+  try {
+    db.prepare('SELECT 1').get()
+    res.json({ status: 'ok', uptime: process.uptime() })
+  } catch (err) {
+    res.status(503).json({ status: 'error', error: err.message })
+  }
+})
 
 // GET /api/meetings?date=YYYY-MM-DD&type=greyhound|horse
 app.get('/api/meetings', async (req, res) => {
@@ -32,7 +47,7 @@ app.get('/api/races', (req, res) => {
 
 // POST /api/research
 app.post('/api/research', async (req, res) => {
-  const { date, meeting, raceNumber, raceType, mode } = req.body
+  const { date, meeting, raceNumber, raceType, mode, stake } = req.body
   if (!date || !meeting || !raceNumber || !raceType || !mode) {
     return res.status(400).json({ error: 'date, meeting, raceNumber, raceType, mode are all required' })
   }
@@ -59,6 +74,7 @@ app.post('/api/research', async (req, res) => {
       box_barrier: prediction.runner.box ?? prediction.runner.barrier ?? null,
       mode,
       confidence:  prediction.confidence,
+      stake:       stake || 10,
     })
 
     res.json({
@@ -125,5 +141,11 @@ async function shutdown() {
 }
 process.on('SIGTERM', shutdown)
 process.on('SIGINT',  shutdown)
+
+if (process.env.NODE_ENV === 'production') {
+  app.get('*', (req, res) => {
+    res.sendFile(path.join(__dirname, '..', 'dist', 'index.html'))
+  })
+}
 
 app.listen(PORT, () => console.log(`[RaceEdge API] http://localhost:${PORT}`))
