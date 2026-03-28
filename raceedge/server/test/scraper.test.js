@@ -2,7 +2,7 @@ const { test, describe } = require('node:test')
 const assert = require('node:assert/strict')
 const fs = require('fs')
 const path = require('path')
-const { parseTheDogsHtml, mergeSources } = require('../scraper.js')
+const { parseTheDogsHtml, parseRacingAndSportsHtml, mergeSources } = require('../scraper.js')
 
 const fix = p => fs.readFileSync(path.join(__dirname, 'fixtures', p), 'utf8')
 
@@ -15,6 +15,19 @@ describe('parseTheDogsHtml', () => {
     assert.equal(runners[0].lastStarts, '1-2-1-3')
     assert.equal(runners[0].bestTime, 29.45)
     assert.equal(runners[1].name, 'Lightning Lou')
+  })
+})
+
+describe('parseRacingAndSportsHtml', () => {
+  test('parses .form-runner rows with varied selectors', () => {
+    const runners = parseRacingAndSportsHtml(fix('racingandsports-race.html'))
+    assert.equal(runners.length, 3)
+    assert.equal(runners[0].name, 'Swift Runner')
+    assert.equal(runners[0].box, 3)
+    assert.equal(runners[0].lastStarts, '2-1-3-1')
+    assert.equal(runners[0].trainer, 'A. Jones')
+    assert.equal(runners[1].name, 'Dark Storm')
+    assert.equal(runners[2].name, 'Quick Silver')
   })
 })
 
