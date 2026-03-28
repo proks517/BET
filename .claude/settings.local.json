@@ -25,7 +25,8 @@
       "Bash(taskkill /F /IM node.exe)",
       "Bash(npx vite:*)",
       "Bash(git -C \"C:/Users/marsh/OneDrive/Documents/PROJECTS/BET/raceedge\" log --oneline fad1f49..4ccdfb3)",
-      "Bash(git -C \"C:/Users/marsh/OneDrive/Documents/PROJECTS/BET/raceedge\" diff --stat fad1f49..4ccdfb3)"
+      "Bash(git -C \"C:/Users/marsh/OneDrive/Documents/PROJECTS/BET/raceedge\" diff --stat fad1f49..4ccdfb3)",
+      "Bash(gh auth:*)"
     ]
   }
 }
