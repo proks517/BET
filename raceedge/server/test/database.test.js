@@ -15,7 +15,7 @@ describe('savePrediction', () => {
     const saved = savePrediction(db, {
       date: '2026-03-20', track: 'Sandown Park', race_number: 3,
       race_type: 'greyhound', runner: 'Fast Dog', box_barrier: 2,
-      mode: 'safest', confidence: 0.78
+      mode: 'safest', confidence: 0.78, stake: 10
     })
     assert.ok(saved.id > 0)
     assert.equal(saved.runner, 'Fast Dog')
@@ -67,6 +67,15 @@ describe('updateResult', () => {
     assert.equal(updated.result, 'scratched')
     assert.equal(updated.pnl, 0)
   })
+})
+
+test('variable stake P&L calculation', () => {
+  const saved = savePrediction(db, {
+    date: '2026-03-28', track: 'Test Track', race_number: 3, race_type: 'greyhound',
+    runner: 'Stake Test Dog', box_barrier: 1, mode: 'safest', confidence: 0.8, stake: 20,
+  })
+  const updated = updateResult(db, saved.id, 'win', 3.00)
+  assert.equal(updated.pnl, 40.00) // (3 * 20) - 20 = 40
 })
 
 describe('getStats', () => {

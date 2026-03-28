@@ -3,7 +3,7 @@ import './App.css'
 import ReactDOM from 'react-dom/client'
 
 const SOURCES = {
-  greyhound: ['thedogs.com.au', 'racingandsports.com.au', 'grv.org.au', 'tab.com.au'],
+  greyhound: ['thedogs.com.au', 'racingandsports.com.au', 'grv.org.au', 'tab.com.au', 'thegreyhoundrecorder.com.au', 'gbota.com.au'],
   horse:     ['racingaustralia.horse', 'racingandsports.com.au', 'tab.com.au', 'racenet.com.au', 'punters.com.au'],
 }
 
@@ -19,12 +19,15 @@ function App() {
   const [meeting,    setMeeting]    = useState('')
   const [raceNum,    setRaceNum]    = useState(1)
   const [mode,       setMode]       = useState('safest')
+  const [stake,      setStake]      = useState(() => parseFloat(localStorage.getItem('raceedge-stake')) || 10)
 
   // UI
   const [loading,    setLoading]    = useState(false)
   const [loadMsg,    setLoadMsg]    = useState('')
+  const [activeSourceIdx, setActiveSourceIdx] = useState(-1)
   const [result,     setResult]     = useState(null)
   const [error,      setError]      = useState('')
+  const [theme,      setTheme]      = useState(() => localStorage.getItem('raceedge-theme') || 'dark')
 
   // Record result
   const [odds,       setOdds]       = useState('')
@@ -39,6 +42,23 @@ function App() {
   }, [])
 
   useEffect(() => { loadStats() }, [loadStats])
+
+  useEffect(() => {
+    document.documentElement.setAttribute('data-theme', theme)
+    localStorage.setItem('raceedge-theme', theme)
+  }, [theme])
+
+  useEffect(() => {
+    if (!error) return
+    const timer = setTimeout(() => setError(''), 8000)
+    return () => clearTimeout(timer)
+  }, [error])
+
+  useEffect(() => {
+    document.title = result
+      ? `${result.runner} — RaceEdge`
+      : 'RaceEdge — Racing Research & Predictions'
+  }, [result])
 
   useEffect(() => {
     if (!date) return
@@ -60,28 +80,34 @@ function App() {
     setRecorded(false)
     setOdds('')
 
-    // Animate source checking
     const srcs = SOURCES[raceType]
-    for (let i = 0; i < srcs.length; i++) {
-      setLoadMsg(`Checking ${srcs[i]}… (${i + 1}/${srcs.length})`)
-      await new Promise(r => setTimeout(r, 350))
-    }
-    setLoadMsg('Analysing runners…')
+    const animPromise = (async () => {
+      for (let i = 0; i < srcs.length; i++) {
+        setActiveSourceIdx(i)
+        setLoadMsg(`Checking ${srcs[i]}... (${i + 1}/${srcs.length})`)
+        await new Promise(r => setTimeout(r, 600))
+      }
+      setLoadMsg('Analysing runners...')
+      setActiveSourceIdx(srcs.length)
+    })()
 
     try {
       const res = await fetch('/api/research', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ date, meeting, raceNumber: raceNum, raceType, mode }),
+        body: JSON.stringify({ date, meeting, raceNumber: raceNum, raceType, mode, stake }),
       })
       const data = await res.json()
       if (!res.ok) throw new Error(data.error || 'Research failed')
+      await animPromise
       setResult(data)
     } catch (e) {
+      await animPromise
       setError(e.message)
     } finally {
       setLoading(false)
       setLoadMsg('')
+      setActiveSourceIdx(-1)
     }
   }
 
@@ -107,8 +133,15 @@ function App() {
   return (
     <div className="app">
       <div className="app-header">
-        <h1>RaceEdge</h1>
-        <div className="subtitle">Australian Racing Research &amp; Prediction Tracker</div>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+          <div>
+            <h1>RaceEdge</h1>
+            <div className="subtitle">Australian Racing Research &amp; Prediction Tracker</div>
+          </div>
+          <button className="theme-toggle" onClick={() => setTheme(t => t === 'dark' ? 'light' : 'dark')}>
+            {theme === 'dark' ? 'Light' : 'Dark'}
+          </button>
+        </div>
       </div>
 
       {/* ── Controls ─────────────────────────────────────── */}
@@ -147,6 +180,12 @@ function App() {
               )}
             </select>
           </label>
+
+          <label>
+            Stake ($)
+            <input type="number" min="1" step="1" value={stake}
+              onChange={e => { const v = parseFloat(e.target.value) || 10; setStake(v); localStorage.setItem('raceedge-stake', String(v)) }} />
+          </label>
         </div>
 
         <label style={{ marginBottom: 16 }}>
@@ -170,9 +209,9 @@ function App() {
 
         {loading && (
           <div className="loading-sources">
-            {SOURCES[raceType].map(src => (
-              <div className="source-item" key={src}>
-                <div className="spinner" />
+            {SOURCES[raceType].map((src, i) => (
+              <div className={`source-item ${i < activeSourceIdx ? 'done' : i === activeSourceIdx ? 'active' : 'pending'}`} key={src}>
+                <div className={i < activeSourceIdx ? 'check-icon' : i === activeSourceIdx ? 'spinner' : 'dot'} />
                 <span>{src}</span>
               </div>
             ))}
@@ -181,7 +220,12 @@ function App() {
         )}
       </div>
 
-      {error && <div className="error-msg">⚠️ {error}</div>}
+      {error && (
+        <div className="error-toast">
+          <span>Warning: {error}</span>
+          <button className="error-dismiss" onClick={() => setError('')}>Dismiss</button>
+        </div>
+      )}
 
       {/* ── Result ───────────────────────────────────────── */}
       {result && !loading && (
@@ -273,7 +317,7 @@ function App() {
               <div className={`stat-value ${stats.total_pnl >= 0 ? 'pnl-pos' : 'pnl-neg'}`}>
                 {stats.total_pnl >= 0 ? '+' : ''}${stats.total_pnl.toFixed(2)}
               </div>
-              <div className="stat-label">Total P&amp;L ($10 stake)</div>
+              <div className="stat-label">Total P&amp;L</div>
             </div>
             {stats.by_mode?.map(m => (
               <div key={m.mode} className="stat-card">

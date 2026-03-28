@@ -29,11 +29,11 @@ function initDb() {
   return db
 }
 
-function savePrediction(db, { date, track, race_number, race_type, runner, box_barrier, mode, confidence }) {
+function savePrediction(db, { date, track, race_number, race_type, runner, box_barrier, mode, confidence, stake = 10 }) {
   const info = db.prepare(`
-    INSERT INTO predictions (date, track, race_number, race_type, runner, box_barrier, mode, confidence)
-    VALUES (@date, @track, @race_number, @race_type, @runner, @box_barrier, @mode, @confidence)
-  `).run({ date, track, race_number, race_type, runner, box_barrier, mode, confidence })
+    INSERT INTO predictions (date, track, race_number, race_type, runner, box_barrier, mode, confidence, stake)
+    VALUES (@date, @track, @race_number, @race_type, @runner, @box_barrier, @mode, @confidence, @stake)
+  `).run({ date, track, race_number, race_type, runner, box_barrier, mode, confidence, stake })
   return db.prepare('SELECT * FROM predictions WHERE id = ?').get(info.lastInsertRowid)
 }
 
@@ -42,7 +42,9 @@ function getPredictions(db, limit = 100) {
 }
 
 function updateResult(db, id, result, odds) {
-  const stake = 10 // flat stake per spec — matches schema DEFAULT 10
+  const pred = db.prepare('SELECT stake FROM predictions WHERE id = ?').get(id)
+  if (!pred) return undefined
+  const stake = pred.stake ?? 10
   let pnl = null
   if (result === 'win' && odds != null) {
     pnl = Math.round(((odds * stake) - stake) * 100) / 100
