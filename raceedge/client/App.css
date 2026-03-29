@@ -103,6 +103,68 @@ input:focus, select:focus { border-color: #f59e0b; }
 .confidence-fill { height: 100%; background: linear-gradient(90deg, #059669, #f59e0b); border-radius: 4px; transition: width 0.5s ease; }
 .reasoning { font-size: 0.88rem; color: var(--text-content); line-height: 1.6; }
 
+.score-breakdown {
+  background: var(--bg-result);
+  border: 1px solid var(--border-result);
+  border-radius: 10px;
+  padding: 16px;
+  margin-bottom: 14px;
+}
+
+.breakdown-heading {
+  font-size: 0.82rem;
+  font-weight: 700;
+  color: var(--text-secondary);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  margin-bottom: 12px;
+}
+
+.breakdown-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.breakdown-item {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+
+.breakdown-meta {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  font-size: 0.82rem;
+  color: var(--text-secondary);
+}
+
+.breakdown-track {
+  height: 10px;
+  border-radius: 999px;
+  overflow: hidden;
+  background: var(--bg-panel);
+}
+
+.breakdown-fill {
+  height: 100%;
+  border-radius: 999px;
+  transition: width 0.4s ease;
+}
+
+.breakdown-fill.good {
+  background: linear-gradient(90deg, #059669, #34d399);
+}
+
+.breakdown-fill.warn {
+  background: linear-gradient(90deg, #d97706, #fbbf24);
+}
+
+.breakdown-fill.bad {
+  background: linear-gradient(90deg, #b91c1c, #f87171);
+}
+
 /* Sources */
 .sources-row { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 10px; }
 .src-tag { padding: 3px 10px; border-radius: 20px; font-size: 0.74rem; font-weight: 600; }
@@ -296,6 +358,7 @@ input:focus, select:focus { border-color: #f59e0b; }
   .refresh-btn { width: 100%; }
   .health-table { font-size: 0.74rem; }
   .health-table th, .health-table td { padding: 6px 5px; }
+  .breakdown-meta { flex-direction: column; gap: 2px; }
   .preds-table { font-size: 0.72rem; }
   .preds-table th, .preds-table td { padding: 5px 4px; }
 }

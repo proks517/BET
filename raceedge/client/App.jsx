@@ -7,6 +7,15 @@ const SOURCES = {
   horse:     ['racingaustralia.horse', 'racingandsports.com.au', 'tab.com.au', 'racenet.com.au', 'punters.com.au'],
 }
 
+const SCORE_FACTORS = [
+  { key: 'recentForm', label: 'Recent Form', weight: '30%' },
+  { key: 'bestTime', label: 'Best Time', weight: '25%' },
+  { key: 'boxDraw', label: 'Box/Barrier Draw', weight: '15%' },
+  { key: 'classConsistency', label: 'Class Consistency', weight: '15%' },
+  { key: 'trainerStrikeRate', label: 'Trainer Strike Rate', weight: '10%' },
+  { key: 'daysSinceLastRun', label: 'Days Since Last Run', weight: '5%' },
+]
+
 const HEALTH_SOURCE_LABELS = {
   thedogs: 'TheDogs',
   racingandsports: 'Racing & Sports',
@@ -39,6 +48,12 @@ function getHealthTone(row) {
   if (!row.total_attempts) return 'unknown'
   if (row.success_rate_pct > 70) return 'good'
   if (row.success_rate_pct >= 40) return 'warn'
+  return 'bad'
+}
+
+function getFactorTone(score) {
+  if (score >= 70) return 'good'
+  if (score >= 40) return 'warn'
   return 'bad'
 }
 
@@ -310,14 +325,39 @@ function App() {
             </div>
 
             <div className="confidence-wrap">
-              <div className="confidence-label">Confidence: {Math.round(result.confidence * 100)}%</div>
+              <div className="confidence-label">Confidence: {result.confidence}%</div>
               <div className="confidence-bar">
-                <div className="confidence-fill" style={{ width: `${result.confidence * 100}%` }} />
+                <div className="confidence-fill" style={{ width: `${result.confidence}%` }} />
               </div>
             </div>
 
             <div className="reasoning">{result.reasoning}</div>
           </div>
+
+          {result.breakdown && (
+            <div className="score-breakdown">
+              <div className="breakdown-heading">Score Breakdown</div>
+              <div className="breakdown-list">
+                {SCORE_FACTORS.map(factor => {
+                  const score = result.breakdown[factor.key] ?? 0
+                  return (
+                    <div className="breakdown-item" key={factor.key}>
+                      <div className="breakdown-meta">
+                        <span>{factor.label}</span>
+                        <span>{factor.weight} · {score}</span>
+                      </div>
+                      <div className="breakdown-track">
+                        <div
+                          className={`breakdown-fill ${getFactorTone(score)}`}
+                          style={{ width: `${score}%` }}
+                        />
+                      </div>
+                    </div>
+                  )
+                })}
+              </div>
+            </div>
+          )}
 
           {result.allScores?.length > 0 && (
             <div style={{ marginBottom: 14 }}>

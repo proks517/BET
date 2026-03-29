@@ -1,45 +1,324 @@
-/**
- * Score a single runner 0–100.
- * @param {import('./scraper').RunnerData} runner
- * @param {number|null} fieldAvgTime
- */
+const FACTOR_WEIGHTS = {
+  recentForm: 0.30,
+  bestTime: 0.25,
+  boxDraw: 0.15,
+  classConsistency: 0.15,
+  trainerStrikeRate: 0.10,
+  daysSinceLastRun: 0.05,
+}
+
+const FORM_RECENCY_WEIGHTS = [6, 5, 4, 3, 2, 1]
+const FORM_MAX_POINTS = FORM_RECENCY_WEIGHTS.reduce((sum, weight) => sum + weight, 0)
+const MAX_COMPOSITE_SCORE = 100
+
+const DNF_MARKERS = new Set(['F', 'DNF', 'PU', 'UR', 'BD', 'FF', 'REF', 'NP'])
+
+const GREYHOUND_BOX_SCORES = {
+  sprint:  { 1: 85, 2: 75, 3: 65, 4: 70, 5: 60, 6: 55, 7: 50, 8: 45 },
+  middle:  { 1: 70, 2: 75, 3: 72, 4: 68, 5: 65, 6: 60, 7: 55, 8: 50 },
+  staying: { 1: 70, 2: 68, 3: 66, 4: 64, 5: 62, 6: 60, 7: 58, 8: 55 },
+}
+
+const FACTOR_LABELS = {
+  recentForm: 'recent form',
+  bestTime: 'best time',
+  boxDraw: 'draw',
+  classConsistency: 'class consistency',
+  trainerStrikeRate: 'trainer strike rate',
+  daysSinceLastRun: 'days since last run',
+}
+
+function clamp(value, min = 0, max = 100) {
+  return Math.max(min, Math.min(max, value))
+}
+
+function roundScore(value) {
+  return clamp(Math.round(value))
+}
+
+function interpolate(value, inMin, inMax, outMin, outMax) {
+  if (inMax === inMin) return outMax
+  const ratio = clamp((value - inMin) / (inMax - inMin), 0, 1)
+  return outMin + (outMax - outMin) * ratio
+}
+
+function toNumber(value) {
+  if (value == null || value === '') return null
+  if (typeof value === 'number') return Number.isFinite(value) ? value : null
+  const parsed = parseFloat(String(value).replace(/[^0-9.-]/g, ''))
+  return Number.isFinite(parsed) ? parsed : null
+}
+
+function splitFormTokens(lastStarts) {
+  if (!lastStarts) return []
+  return String(lastStarts)
+    .split(/[^A-Za-z0-9]+/)
+    .map(token => token.trim())
+    .filter(Boolean)
+}
+
+function parseFormFinish(token) {
+  if (token == null) return null
+  const normalized = String(token).trim().toUpperCase()
+  if (!normalized) return null
+  if (DNF_MARKERS.has(normalized)) return 'dnf'
+  if (/(DNF|PU|UR|BD|FF|REF)/.test(normalized)) return 'dnf'
+  const placing = parseInt(normalized, 10)
+  return Number.isInteger(placing) ? placing : null
+}
+
+function inferRaceType(runner) {
+  const explicit = typeof runner.raceType === 'string' ? runner.raceType.toLowerCase() : null
+  if (explicit === 'greyhound' || explicit === 'horse') return explicit
+  if (runner.box != null && runner.barrier == null) return 'greyhound'
+  if (runner.barrier != null) return 'horse'
+  if (runner.box != null) return 'greyhound'
+  return 'greyhound'
+}
+
+function getDistanceMeters(runner) {
+  return (
+    toNumber(runner.distanceMeters) ??
+    toNumber(runner.raceDistance) ??
+    toNumber(runner.distance) ??
+    toNumber(runner.trackDistance)
+  )
+}
+
+function getDaysSinceLastRunValue(runner) {
+  const explicitDays = toNumber(runner.daysSinceLastRun)
+  if (explicitDays != null) return explicitDays
+
+  const lastRunDate = runner.lastRunDate || runner.lastRun
+  const raceDate = runner.raceDate || runner.date
+  if (!lastRunDate || !raceDate) return null
+
+  const last = new Date(lastRunDate)
+  const race = new Date(raceDate)
+  if (Number.isNaN(last.getTime()) || Number.isNaN(race.getTime())) return null
+
+  return Math.round((race.getTime() - last.getTime()) / (1000 * 60 * 60 * 24))
+}
+
+function getCareerTop3Rate(runner) {
+  const directRate = toNumber(runner.careerTop3Pct ?? runner.top3Pct)
+  if (directRate != null) return clamp(directRate)
+
+  const careerStarts = toNumber(runner.careerStarts ?? runner.starts)
+  const top3Count = toNumber(runner.careerTop3Count ?? runner.careerPlacings ?? runner.top3Count)
+  if (careerStarts && top3Count != null) {
+    return clamp((top3Count / careerStarts) * 100)
+  }
+
+  const wins = toNumber(runner.careerWins ?? runner.wins)
+  const seconds = toNumber(runner.careerSeconds ?? runner.seconds)
+  const thirds = toNumber(runner.careerThirds ?? runner.thirds)
+  if (careerStarts && (wins != null || seconds != null || thirds != null)) {
+    return clamp((((wins || 0) + (seconds || 0) + (thirds || 0)) / careerStarts) * 100)
+  }
+
+  const finishes = splitFormTokens(runner.lastStarts)
+    .map(parseFormFinish)
+    .filter(finish => finish != null)
+
+  if (finishes.length === 0) return null
+
+  const top3 = finishes.filter(finish => typeof finish === 'number' && finish <= 3).length
+  return clamp((top3 / finishes.length) * 100)
+}
+
+function scoreRecentForm(runner) {
+  const finishes = splitFormTokens(runner.lastStarts)
+    .map(parseFormFinish)
+    .slice(0, FORM_RECENCY_WEIGHTS.length)
+
+  if (finishes.length === 0) return 50
+
+  const rawPoints = finishes.reduce((total, finish, index) => {
+    const weight = FORM_RECENCY_WEIGHTS[index]
+    if (finish === 1) return total + weight
+    if (finish === 2) return total + (weight * 0.7)
+    if (finish === 3) return total + (weight * 0.4)
+    if (finish === 4) return total + (weight * 0.2)
+    if (finish === 'dnf') return total - (weight * 0.1)
+    return total
+  }, 0)
+
+  return roundScore((Math.max(rawPoints, 0) / FORM_MAX_POINTS) * 100)
+}
+
+function scoreBestTime(runner, fieldAvgTime) {
+  const bestTime = toNumber(runner.bestTime)
+  if (bestTime == null || fieldAvgTime == null) return 45
+
+  const diff = fieldAvgTime - bestTime
+  if (diff > 0.5) {
+    return roundScore(interpolate(Math.min(diff, 1.0), 0.5, 1.0, 90, 100))
+  }
+  if (diff >= 0) {
+    return roundScore(interpolate(diff, 0, 0.5, 60, 89))
+  }
+  return roundScore(interpolate(Math.min(Math.abs(diff), 1.0), 0, 1.0, 59, 20))
+}
+
+function scoreBoxDraw(runner) {
+  const raceType = inferRaceType(runner)
+
+  if (raceType === 'horse') {
+    const barrier = toNumber(runner.barrier ?? runner.box)
+    if (barrier == null) return 50
+
+    const fieldSize = Math.max(
+      toNumber(runner.fieldSize) || 0,
+      Math.round(barrier),
+      8
+    )
+
+    if (fieldSize <= 1) return 70
+
+    const insideAdvantage = 1 - ((barrier - 1) / Math.max(fieldSize - 1, 1))
+    return roundScore(45 + (insideAdvantage * 35))
+  }
+
+  const box = toNumber(runner.box ?? runner.barrier)
+  if (box == null) return 50
+
+  const distance = getDistanceMeters(runner)
+  const profile = distance == null
+    ? GREYHOUND_BOX_SCORES.middle
+    : distance <= 320
+      ? GREYHOUND_BOX_SCORES.sprint
+      : distance <= 430
+        ? GREYHOUND_BOX_SCORES.middle
+        : GREYHOUND_BOX_SCORES.staying
+
+  return profile[Math.round(box)] ?? 50
+}
+
+function scoreClassConsistency(runner) {
+  const top3Rate = getCareerTop3Rate(runner)
+  if (top3Rate == null) return 50
+
+  if (top3Rate >= 60) {
+    return roundScore(interpolate(top3Rate, 60, 100, 90, 100))
+  }
+  if (top3Rate >= 40) {
+    return roundScore(interpolate(top3Rate, 40, 60, 60, 89))
+  }
+  if (top3Rate >= 20) {
+    return roundScore(interpolate(top3Rate, 20, 40, 30, 59))
+  }
+  return roundScore(interpolate(top3Rate, 0, 20, 0, 29))
+}
+
+function scoreTrainerStrikeRate(runner) {
+  const strikeRate = toNumber(runner.trainerStrike ?? runner.trainerStrikeRate)
+  if (strikeRate == null) return 50
+
+  if (strikeRate > 25) {
+    return roundScore(interpolate(Math.min(strikeRate, 40), 25, 40, 80, 100))
+  }
+  if (strikeRate >= 15) {
+    return roundScore(interpolate(strikeRate, 15, 25, 60, 79))
+  }
+  if (strikeRate >= 5) {
+    return roundScore(interpolate(strikeRate, 5, 15, 30, 59))
+  }
+  return roundScore(interpolate(Math.max(strikeRate, 0), 0, 5, 0, 29))
+}
+
+function scoreDaysSinceLastRun(runner) {
+  const days = getDaysSinceLastRunValue(runner)
+  if (days == null || days < 0) return 50
+  if (days >= 7 && days <= 21) return 85
+  if (days >= 4 && days <= 6) return 70
+  if (days >= 22 && days <= 35) return 65
+  if (days >= 36 && days <= 60) return 45
+  if (days > 60) return 25
+  return 55
+}
+
+function buildScoreBreakdown(runner, fieldAvgTime) {
+  return {
+    recentForm: scoreRecentForm(runner),
+    bestTime: scoreBestTime(runner, fieldAvgTime),
+    boxDraw: scoreBoxDraw(runner),
+    classConsistency: scoreClassConsistency(runner),
+    trainerStrikeRate: scoreTrainerStrikeRate(runner),
+    daysSinceLastRun: scoreDaysSinceLastRun(runner),
+  }
+}
+
+function getCompositeScore(breakdown) {
+  return roundScore(
+    (breakdown.recentForm * FACTOR_WEIGHTS.recentForm) +
+    (breakdown.bestTime * FACTOR_WEIGHTS.bestTime) +
+    (breakdown.boxDraw * FACTOR_WEIGHTS.boxDraw) +
+    (breakdown.classConsistency * FACTOR_WEIGHTS.classConsistency) +
+    (breakdown.trainerStrikeRate * FACTOR_WEIGHTS.trainerStrikeRate) +
+    (breakdown.daysSinceLastRun * FACTOR_WEIGHTS.daysSinceLastRun)
+  )
+}
+
 function scoreRunner(runner, fieldAvgTime) {
-  let score = 0
+  return getCompositeScore(buildScoreBreakdown(runner, fieldAvgTime))
+}
 
-  // Recent form: win=5pts, place=2pts, show=1pt, cap at 20
-  if (runner.lastStarts) {
-    const places = runner.lastStarts.split('-').map(Number).filter(n => !isNaN(n)).slice(0, 6)
-    for (const p of places) {
-      if (p === 1) score += 5
-      else if (p === 2) score += 2
-      else if (p === 3) score += 1
+function buildReasoning(entry, rankedEntries, mode, fieldAvgTime) {
+  const rank = rankedEntries.findIndex(item => item.runner.name === entry.runner.name) + 1
+  const rankedFactors = Object.entries(entry.breakdown)
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, 2)
+
+  const parts = [`${entry.runner.name} ranks #${rank} of ${rankedEntries.length} on weighted composite scoring.`]
+
+  if (rankedFactors.length > 0) {
+    const summary = rankedFactors
+      .map(([factor, score]) => `${FACTOR_LABELS[factor] || factor} ${score}`)
+      .join(', ')
+    parts.push(`Best factors: ${summary}.`)
+  }
+
+  if (entry.runner.lastStarts) {
+    parts.push(`Recent form line: ${entry.runner.lastStarts}.`)
+  }
+
+  if (toNumber(entry.runner.bestTime) != null && fieldAvgTime != null) {
+    const diff = fieldAvgTime - entry.runner.bestTime
+    if (diff > 0) {
+      parts.push(`Best time ${entry.runner.bestTime}s is ${diff.toFixed(2)}s quicker than the field average.`)
+    } else if (diff < 0) {
+      parts.push(`Best time ${entry.runner.bestTime}s is ${Math.abs(diff).toFixed(2)}s off the field average.`)
     }
-    score = Math.min(score, 20)
   }
 
-  // Best time vs field average: up to 15pts
-  if (runner.bestTime && fieldAvgTime) {
-    const diff = fieldAvgTime - runner.bestTime
-    if (diff > 0) score += Math.min(diff * 10, 15)
+  if (mode === 'value') {
+    const topScore = rankedEntries[0]?.compositeScore ?? entry.compositeScore
+    parts.push(`Chosen as the value play: within ${Math.abs(topScore - entry.compositeScore)} points of the top scorer without being the headline pick.`)
   }
 
-  // Box/barrier advantage (boxes 1–4): 5pts
-  if (runner.box && runner.box <= 4) score += 5
-
-  // Trainer strike rate
-  if (runner.trainerStrike) {
-    if (runner.trainerStrike >= 25)      score += 10
-    else if (runner.trainerStrike >= 20) score += 7
-    else if (runner.trainerStrike >= 15) score += 4
+  if (mode === 'longshot') {
+    parts.push(`Chosen as the long shot: ranked outside the top three overall but still carrying a real speed edge.`)
   }
 
-  // Class consistency: all top-3 in last 4 starts
-  if (runner.lastStarts) {
-    const last4 = runner.lastStarts.split('-').map(Number).filter(n => !isNaN(n)).slice(0, 4)
-    if (last4.length >= 4 && last4.every(p => p <= 3)) score += 3
-  }
+  return parts.join(' ')
+}
 
-  return Math.min(Math.max(Math.round(score), 0), 100)
+function buildScoredEntry(runner, fieldAvgTime, fieldSize) {
+  const enrichedRunner = {
+    ...runner,
+    fieldSize: runner.fieldSize ?? fieldSize,
+  }
+  const breakdown = buildScoreBreakdown(enrichedRunner, fieldAvgTime)
+  const compositeScore = getCompositeScore(breakdown)
+
+  return {
+    runner,
+    breakdown,
+    compositeScore,
+    score: compositeScore,
+    confidence: Math.min(92, Math.round((compositeScore / MAX_COMPOSITE_SCORE) * 100)),
+  }
 }
 
 /**
@@ -51,71 +330,71 @@ function applyMode(runners, mode) {
   if (!['safest', 'value', 'longshot'].includes(mode)) {
     throw new Error(`Unknown mode: ${mode}`)
   }
+  if (!Array.isArray(runners) || runners.length === 0) {
+    throw new Error('No runners supplied')
+  }
 
-  const times = runners.map(r => r.bestTime).filter(Boolean)
-  const fieldAvgTime = times.length > 0 ? times.reduce((a, b) => a + b, 0) / times.length : null
+  const times = runners.map(runner => toNumber(runner.bestTime)).filter(time => time != null)
+  const fieldAvgTime = times.length > 0
+    ? times.reduce((sum, time) => sum + time, 0) / times.length
+    : null
+  const fieldSize = runners.length
 
   const scored = runners
-    .map(r => ({ runner: r, score: scoreRunner(r, fieldAvgTime) }))
-    .sort((a, b) => b.score - a.score)
+    .map(runner => buildScoredEntry(runner, fieldAvgTime, fieldSize))
+    .sort((a, b) => b.compositeScore - a.compositeScore || (a.runner.odds ?? Infinity) - (b.runner.odds ?? Infinity))
 
-  let selected
+  const topEntry = scored[0]
+  let selected = topEntry
 
-  if (mode === 'safest') {
-    selected = scored[0]
-
-  } else if (mode === 'value') {
-    const minOdds = Math.min(...runners.map(r => r.odds || 999))
-    const nonFav = scored.filter(s => !s.runner.odds || s.runner.odds > minOdds * 1.1) // 10% margin handles co-favourites
-    selected = nonFav.length > 0 ? nonFav[0] : scored[Math.min(1, scored.length - 1)]
-
-  } else { // longshot
-    const minOdds = Math.min(...runners.map(r => r.odds || 999))
-    const candidates = scored.filter(s => {
-      const r = s.runner
-      if (r.odds && r.odds <= minOdds) return false // exclude favourite
-      const hasOdds      = !r.odds || r.odds >= 3.00
-      const hasBestTime  = r.bestTime && fieldAvgTime && r.bestTime < fieldAvgTime
-      const hasRecentWin = r.lastStarts && r.lastStarts.split('-').slice(0, 3).includes('1')
-      const hasBoxAdv    = r.box && r.box <= 3
-      return hasOdds && (hasBestTime || hasRecentWin || hasBoxAdv)
-    })
-    selected = candidates.length > 0 ? candidates[0] : scored[Math.min(2, scored.length - 1)]
+  if (mode === 'value') {
+    const candidates = scored.filter((entry, index) =>
+      index > 0 &&
+      entry.compositeScore > 55 &&
+      (topEntry.compositeScore - entry.compositeScore) <= 15
+    )
+    selected = candidates[0] || scored[Math.min(1, scored.length - 1)]
+  } else if (mode === 'longshot') {
+    const candidates = scored.filter((entry, index) =>
+      index >= 3 &&
+      entry.compositeScore > 40 &&
+      entry.breakdown.bestTime > 70
+    )
+    selected = candidates[0] || scored[Math.min(3, scored.length - 1)]
   }
 
-  const maxScore    = scored[0].score
-  const confidence  = maxScore > 0 ? Math.round((selected.score / maxScore) * 0.85 * 100) / 100 : 0.50
-  const reasoning   = buildReasoning(selected.runner, scored, mode, fieldAvgTime)
+  const reasoning = buildReasoning(selected, scored, mode, fieldAvgTime)
 
   return {
-    runner:    selected.runner,
-    score:     selected.score,
-    confidence,
+    runner: selected.runner,
+    score: selected.compositeScore,
+    compositeScore: selected.compositeScore,
+    confidence: selected.confidence,
+    breakdown: selected.breakdown,
     mode,
     reasoning,
-    allScores: scored.map(s => ({ name: s.runner.name, score: s.score, odds: s.runner.odds })),
+    allScores: scored.map(entry => ({
+      name: entry.runner.name,
+      box: entry.runner.box,
+      barrier: entry.runner.barrier,
+      odds: entry.runner.odds,
+      score: entry.compositeScore,
+      compositeScore: entry.compositeScore,
+      confidence: entry.confidence,
+      breakdown: entry.breakdown,
+    })),
   }
 }
 
-function buildReasoning(runner, scored, mode, fieldAvgTime) {
-  const rank  = scored.findIndex(s => s.runner.name === runner.name) + 1
-  const parts = [`${runner.name} ranks #${rank} of ${scored.length} on composite score.`]
-
-  if (runner.lastStarts) parts.push(`Recent form: ${runner.lastStarts}.`)
-
-  if (runner.bestTime && fieldAvgTime) {
-    const diff = fieldAvgTime - runner.bestTime
-    if (diff > 0) parts.push(`Best time ${runner.bestTime}s is ${diff.toFixed(2)}s faster than field average.`)
-  }
-
-  if (runner.box && runner.box <= 4) parts.push(`Box ${runner.box} is an advantaged draw.`)
-  if (runner.barrier) parts.push(`Barrier ${runner.barrier}.`)
-  if (runner.trainerStrike >= 20) parts.push(`Trainer strike rate ${runner.trainerStrike}% is above average.`)
-
-  if (mode === 'value'    && runner.odds) parts.push(`At $${runner.odds.toFixed(2)} offers value over the favourite.`)
-  if (mode === 'longshot')                parts.push(`Selected as longshot — lower market profile with specific form indicators.`)
-
-  return parts.join(' ')
+module.exports = {
+  FACTOR_WEIGHTS,
+  buildScoreBreakdown,
+  scoreRunner,
+  scoreRecentForm,
+  scoreBestTime,
+  scoreBoxDraw,
+  scoreClassConsistency,
+  scoreTrainerStrikeRate,
+  scoreDaysSinceLastRun,
+  applyMode,
 }
-
-module.exports = { scoreRunner, applyMode }
