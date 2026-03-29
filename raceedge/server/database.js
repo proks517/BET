@@ -19,6 +19,19 @@ const SCHEMA = `
     stake       REAL NOT NULL DEFAULT 10,
     pnl         REAL,
     created_at  TEXT NOT NULL DEFAULT (datetime('now'))
+  );
+
+  CREATE TABLE IF NOT EXISTS scraper_health (
+    id               INTEGER PRIMARY KEY AUTOINCREMENT,
+    source_name      TEXT NOT NULL,
+    race_date        TEXT NOT NULL,
+    track            TEXT NOT NULL,
+    race_number      INTEGER NOT NULL,
+    status           TEXT NOT NULL,
+    response_time_ms INTEGER NOT NULL,
+    records_returned INTEGER NOT NULL DEFAULT 0,
+    error_message    TEXT,
+    checked_at       TEXT NOT NULL DEFAULT (datetime('now'))
   )
 `
 
@@ -84,4 +97,84 @@ function getStats(db) {
   return { overall_win_rate, by_mode, by_type, total_pnl, last10 }
 }
 
-module.exports = { initDb, savePrediction, getPredictions, updateResult, getStats }
+function logScraperHealth(db, entry) {
+  const info = db.prepare(`
+    INSERT INTO scraper_health (
+      source_name, race_date, track, race_number, status,
+      response_time_ms, records_returned, error_message
+    )
+    VALUES (
+      @source_name, @race_date, @track, @race_number, @status,
+      @response_time_ms, @records_returned, @error_message
+    )
+  `).run({
+    ...entry,
+    records_returned: entry.records_returned ?? 0,
+    error_message: entry.error_message ?? null,
+  })
+
+  return db.prepare('SELECT * FROM scraper_health WHERE id = ?').get(info.lastInsertRowid)
+}
+
+function getScraperStats(db) {
+  const rows = db.prepare(`
+    WITH recent AS (
+      SELECT *
+      FROM scraper_health
+      WHERE checked_at >= datetime('now', '-7 days')
+    ),
+    source_summary AS (
+      SELECT
+        source_name,
+        COUNT(*) AS total_attempts,
+        SUM(CASE WHEN status = 'success' THEN 1 ELSE 0 END) AS success_count,
+        ROUND(
+          CASE
+            WHEN COUNT(*) = 0 THEN 0
+            ELSE (SUM(CASE WHEN status = 'success' THEN 1.0 ELSE 0 END) / COUNT(*)) * 100
+          END,
+          1
+        ) AS success_rate_pct,
+        ROUND(AVG(response_time_ms)) AS average_response_time_ms,
+        MAX(checked_at) AS last_checked
+      FROM recent
+      GROUP BY source_name
+    )
+    SELECT
+      summary.source_name,
+      summary.total_attempts,
+      summary.success_count,
+      summary.success_rate_pct,
+      summary.average_response_time_ms,
+      summary.last_checked,
+      (
+        SELECT recent_error.error_message
+        FROM recent AS recent_error
+        WHERE recent_error.source_name = summary.source_name
+          AND recent_error.error_message IS NOT NULL
+          AND recent_error.error_message != ''
+        ORDER BY recent_error.checked_at DESC, recent_error.id DESC
+        LIMIT 1
+      ) AS last_seen_error
+    FROM source_summary AS summary
+    ORDER BY summary.source_name
+  `).all()
+
+  return rows.map(row => ({
+    ...row,
+    success_rate_pct: Number(row.success_rate_pct),
+    average_response_time_ms: row.average_response_time_ms == null
+      ? null
+      : Number(row.average_response_time_ms),
+  }))
+}
+
+module.exports = {
+  initDb,
+  savePrediction,
+  getPredictions,
+  updateResult,
+  getStats,
+  logScraperHealth,
+  getScraperStats,
+}

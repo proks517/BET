@@ -1,9 +1,17 @@
-const { test, describe, before, after } = require('node:test')
+const { test, describe, before, after, beforeEach } = require('node:test')
 const assert = require('node:assert/strict')
 
 process.env.DB_PATH = ':memory:'
 
-const { initDb, savePrediction, getPredictions, updateResult, getStats } = require('../database.js')
+const {
+  initDb,
+  savePrediction,
+  getPredictions,
+  updateResult,
+  getStats,
+  logScraperHealth,
+  getScraperStats,
+} = require('../database.js')
 
 let db
 
@@ -86,5 +94,128 @@ describe('getStats', () => {
     assert.ok(Array.isArray(stats.by_type))
     assert.ok(typeof stats.total_pnl === 'number')
     assert.ok(Array.isArray(stats.last10))
+  })
+})
+
+describe('scraper health', () => {
+  beforeEach(() => {
+    db.exec('DELETE FROM scraper_health')
+  })
+
+  test('logScraperHealth saves a record correctly', () => {
+    const saved = logScraperHealth(db, {
+      source_name: 'thedogs',
+      race_date: '2026-03-29',
+      track: 'Sandown Park',
+      race_number: 5,
+      status: 'success',
+      response_time_ms: 215,
+      records_returned: 8,
+      error_message: null,
+    })
+
+    assert.ok(saved.id > 0)
+    assert.equal(saved.source_name, 'thedogs')
+    assert.equal(saved.race_date, '2026-03-29')
+    assert.equal(saved.track, 'Sandown Park')
+    assert.equal(saved.race_number, 5)
+    assert.equal(saved.status, 'success')
+    assert.equal(saved.response_time_ms, 215)
+    assert.equal(saved.records_returned, 8)
+    assert.equal(saved.error_message, null)
+    assert.ok(saved.checked_at)
+  })
+
+  test('getScraperStats returns correct aggregates for mixed success/fail data', () => {
+    logScraperHealth(db, {
+      source_name: 'thedogs',
+      race_date: '2026-03-29',
+      track: 'Sandown Park',
+      race_number: 1,
+      status: 'success',
+      response_time_ms: 120,
+      records_returned: 8,
+      error_message: null,
+    })
+    logScraperHealth(db, {
+      source_name: 'thedogs',
+      race_date: '2026-03-29',
+      track: 'Sandown Park',
+      race_number: 2,
+      status: 'empty',
+      response_time_ms: 180,
+      records_returned: 0,
+      error_message: null,
+    })
+    logScraperHealth(db, {
+      source_name: 'thedogs',
+      race_date: '2026-03-29',
+      track: 'Sandown Park',
+      race_number: 3,
+      status: 'timeout',
+      response_time_ms: 1000,
+      records_returned: 0,
+      error_message: 'Request timed out',
+    })
+    logScraperHealth(db, {
+      source_name: 'racenet',
+      race_date: '2026-03-29',
+      track: 'Randwick',
+      race_number: 4,
+      status: 'error',
+      response_time_ms: 400,
+      records_returned: 0,
+      error_message: 'Bad gateway',
+    })
+    logScraperHealth(db, {
+      source_name: 'racenet',
+      race_date: '2026-03-29',
+      track: 'Randwick',
+      race_number: 5,
+      status: 'success',
+      response_time_ms: 200,
+      records_returned: 12,
+      error_message: null,
+    })
+
+    const oldRecord = logScraperHealth(db, {
+      source_name: 'tab',
+      race_date: '2026-03-20',
+      track: 'Caulfield',
+      race_number: 6,
+      status: 'error',
+      response_time_ms: 350,
+      records_returned: 0,
+      error_message: 'Too old to count',
+    })
+    db.prepare(`
+      UPDATE scraper_health
+      SET checked_at = datetime('now', '-8 days')
+      WHERE id = ?
+    `).run(oldRecord.id)
+
+    const stats = getScraperStats(db)
+    const dogs = stats.find(row => row.source_name === 'thedogs')
+    const racenet = stats.find(row => row.source_name === 'racenet')
+    const tab = stats.find(row => row.source_name === 'tab')
+
+    assert.equal(stats.length, 2)
+    assert.equal(tab, undefined)
+
+    assert.ok(dogs)
+    assert.equal(dogs.total_attempts, 3)
+    assert.equal(dogs.success_count, 1)
+    assert.equal(dogs.success_rate_pct, 33.3)
+    assert.equal(dogs.average_response_time_ms, 433)
+    assert.equal(dogs.last_seen_error, 'Request timed out')
+    assert.ok(dogs.last_checked)
+
+    assert.ok(racenet)
+    assert.equal(racenet.total_attempts, 2)
+    assert.equal(racenet.success_count, 1)
+    assert.equal(racenet.success_rate_pct, 50)
+    assert.equal(racenet.average_response_time_ms, 300)
+    assert.equal(racenet.last_seen_error, 'Bad gateway')
+    assert.ok(racenet.last_checked)
   })
 })

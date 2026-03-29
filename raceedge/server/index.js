@@ -1,7 +1,14 @@
 const express = require('express')
 const cors    = require('cors')
 const path    = require('path')
-const { initDb, savePrediction, getPredictions, updateResult, getStats } = require('./database.js')
+const {
+  initDb,
+  savePrediction,
+  getPredictions,
+  updateResult,
+  getStats,
+  getScraperStats,
+} = require('./database.js')
 const { research, fetchMeetings, closeBrowser } = require('./scraper.js')
 const { applyMode } = require('./predictor.js')
 
@@ -52,7 +59,7 @@ app.post('/api/research', async (req, res) => {
     return res.status(400).json({ error: 'date, meeting, raceNumber, raceType, mode are all required' })
   }
   try {
-    const scrape = await research(date, meeting, raceNumber, raceType)
+    const scrape = await research(date, meeting, raceNumber, raceType, db)
 
     if (scrape.runners.length === 0) {
       return res.status(422).json({
@@ -129,6 +136,15 @@ app.patch('/api/predictions/:id', (req, res) => {
 app.get('/api/stats', (req, res) => {
   try {
     res.json(getStats(db))
+  } catch (err) {
+    res.status(500).json({ error: err.message })
+  }
+})
+
+// GET /api/scraper-health
+app.get('/api/scraper-health', (req, res) => {
+  try {
+    res.json({ sources: getScraperStats(db) })
   } catch (err) {
     res.status(500).json({ error: err.message })
   }

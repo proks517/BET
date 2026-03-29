@@ -1,4 +1,5 @@
 const cheerio = require('cheerio')
+const { logScraperHealth } = require('./database.js')
 
 /**
  * @typedef {{ name:string, box?:number, barrier?:number, lastStarts?:string,
@@ -417,27 +418,82 @@ async function fetchPunters(date, track, raceNumber) {
 
 // ── Main research entry point ─────────────────────────────────────────────────
 
-async function research(date, track, raceNumber, raceType) {
+function getScraperStatus(errorMessage, recordsReturned) {
+  if (errorMessage) {
+    return /timeout|timed out|abort/i.test(errorMessage) ? 'timeout' : 'error'
+  }
+  return recordsReturned > 0 ? 'success' : 'empty'
+}
+
+function saveScraperHealth(db, entry) {
+  if (!db) return
+  try {
+    logScraperHealth(db, entry)
+  } catch (err) {
+    console.error('[ScraperHealth] Failed to save health record:', err.message)
+  }
+}
+
+async function runSourceAttempt(db, sourceConfig, date, track, raceNumber) {
+  const startedAt = Date.now()
+
+  try {
+    const result = await sourceConfig.fetch(date, track, raceNumber)
+    const recordsReturned = Array.isArray(result?.runners) ? result.runners.length : 0
+    const errorMessage = result?.error || null
+
+    saveScraperHealth(db, {
+      source_name: sourceConfig.name,
+      race_date: date,
+      track,
+      race_number: raceNumber,
+      status: getScraperStatus(errorMessage, recordsReturned),
+      response_time_ms: Math.max(0, Date.now() - startedAt),
+      records_returned: recordsReturned,
+      error_message: errorMessage,
+    })
+
+    return result?.source
+      ? result
+      : { source: sourceConfig.label, runners: result?.runners || [], error: errorMessage }
+  } catch (err) {
+    const errorMessage = err?.message || 'Unknown error'
+
+    saveScraperHealth(db, {
+      source_name: sourceConfig.name,
+      race_date: date,
+      track,
+      race_number: raceNumber,
+      status: getScraperStatus(errorMessage, 0),
+      response_time_ms: Math.max(0, Date.now() - startedAt),
+      records_returned: 0,
+      error_message: errorMessage,
+    })
+
+    return { source: sourceConfig.label, runners: [], error: errorMessage }
+  }
+}
+
+async function research(date, track, raceNumber, raceType, db) {
   const fetchers = raceType === 'greyhound'
     ? [
-        fetchTheDogs,
-        (d, t, r) => fetchRacingAndSports(d, t, r, 'greyhound'),
-        fetchGRV,
-        (d, t, r) => fetchTAB(d, t, r, 'greyhound'),
-        fetchGreyhoundRecorder,
-        fetchGBOTA,
+        { name: 'thedogs', label: 'thedogs.com.au', fetch: fetchTheDogs },
+        { name: 'racingandsports', label: 'racingandsports.com.au', fetch: (d, t, r) => fetchRacingAndSports(d, t, r, 'greyhound') },
+        { name: 'grv', label: 'grv.org.au', fetch: fetchGRV },
+        { name: 'tab', label: 'tab.com.au', fetch: (d, t, r) => fetchTAB(d, t, r, 'greyhound') },
+        { name: 'greyhoundrecorder', label: 'thegreyhoundrecorder.com.au', fetch: fetchGreyhoundRecorder },
+        { name: 'gbota', label: 'gbota.com.au', fetch: fetchGBOTA },
       ]
     : [
-        fetchRacingAustralia,
-        (d, t, r) => fetchRacingAndSports(d, t, r, 'horse'),
-        (d, t, r) => fetchTAB(d, t, r, 'horse'),
-        fetchRacenet,
-        fetchPunters,
+        { name: 'racingaustralia', label: 'racingaustralia.horse', fetch: fetchRacingAustralia },
+        { name: 'racingandsports', label: 'racingandsports.com.au', fetch: (d, t, r) => fetchRacingAndSports(d, t, r, 'horse') },
+        { name: 'tab', label: 'tab.com.au', fetch: (d, t, r) => fetchTAB(d, t, r, 'horse') },
+        { name: 'racenet', label: 'racenet.com.au', fetch: fetchRacenet },
+        { name: 'punters', label: 'punters.com.au', fetch: fetchPunters },
       ]
 
-  const settled = await Promise.allSettled(fetchers.map(fn => fn(date, track, raceNumber)))
-  const scraperResults = settled.map(r =>
-    r.status === 'fulfilled' ? r.value : { source: 'unknown', runners: [], error: r.reason?.message }
+  const scraperResults = await Promise.all(
+    fetchers.map(sourceConfig => runSourceAttempt(db, sourceConfig, date, track, raceNumber))
   )
 
   const successful = scraperResults.filter(r => r.runners.length > 0)

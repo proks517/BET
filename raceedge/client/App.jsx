@@ -7,8 +7,61 @@ const SOURCES = {
   horse:     ['racingaustralia.horse', 'racingandsports.com.au', 'tab.com.au', 'racenet.com.au', 'punters.com.au'],
 }
 
+const HEALTH_SOURCE_LABELS = {
+  thedogs: 'TheDogs',
+  racingandsports: 'Racing & Sports',
+  grv: 'GRV',
+  tab: 'TAB',
+  greyhoundrecorder: 'Greyhound Recorder',
+  gbota: 'GBOTA',
+  racingaustralia: 'Racing Australia',
+  racenet: 'Racenet',
+  punters: 'Punters',
+}
+
+const SCRAPER_HEALTH_SOURCES = Object.keys(HEALTH_SOURCE_LABELS)
+
 function todayStr() {
   return new Date().toLocaleDateString('en-CA') // YYYY-MM-DD in local time
+}
+
+function truncateText(text, maxLength = 60) {
+  if (!text) return 'No recent errors'
+  return text.length > maxLength ? `${text.slice(0, maxLength - 1)}...` : text
+}
+
+function formatCheckedAt(value) {
+  if (!value) return 'Never'
+  return new Date(`${value.replace(' ', 'T')}Z`).toLocaleString()
+}
+
+function getHealthTone(row) {
+  if (!row.total_attempts) return 'unknown'
+  if (row.success_rate_pct > 70) return 'good'
+  if (row.success_rate_pct >= 40) return 'warn'
+  return 'bad'
+}
+
+function mergeScraperHealthRows(rows = []) {
+  const bySource = new Map(rows.map(row => [row.source_name, row]))
+  const knownRows = SCRAPER_HEALTH_SOURCES.map(source_name => ({
+    source_name,
+    display_name: HEALTH_SOURCE_LABELS[source_name] || source_name,
+    total_attempts: 0,
+    success_count: 0,
+    success_rate_pct: null,
+    average_response_time_ms: null,
+    last_seen_error: null,
+    last_checked: null,
+    ...(bySource.get(source_name) || {}),
+  }))
+  const extraRows = rows
+    .filter(row => !bySource.has(row.source_name) || !SCRAPER_HEALTH_SOURCES.includes(row.source_name))
+    .map(row => ({
+      ...row,
+      display_name: row.source_name,
+    }))
+  return [...knownRows, ...extraRows]
 }
 
 function App() {
@@ -36,12 +89,26 @@ function App() {
 
   // Stats
   const [stats,      setStats]      = useState(null)
+  const [scraperHealth, setScraperHealth] = useState(() => mergeScraperHealthRows())
+  const [healthLoading, setHealthLoading] = useState(false)
 
   const loadStats = useCallback(() => {
     fetch('/api/stats').then(r => r.json()).then(setStats).catch(() => {})
   }, [])
 
-  useEffect(() => { loadStats() }, [loadStats])
+  const loadScraperHealth = useCallback(() => {
+    setHealthLoading(true)
+    fetch('/api/scraper-health')
+      .then(r => r.json())
+      .then(data => setScraperHealth(mergeScraperHealthRows(data.sources || [])))
+      .catch(() => {})
+      .finally(() => setHealthLoading(false))
+  }, [])
+
+  useEffect(() => {
+    loadStats()
+    loadScraperHealth()
+  }, [loadStats, loadScraperHealth])
 
   useEffect(() => {
     document.documentElement.setAttribute('data-theme', theme)
@@ -108,6 +175,7 @@ function App() {
       setLoading(false)
       setLoadMsg('')
       setActiveSourceIdx(-1)
+      loadScraperHealth()
     }
   }
 
@@ -331,6 +399,45 @@ function App() {
                 <div className="stat-label">{t.race_type === 'greyhound' ? '🐕' : '🐎'} {t.race_type} ({t.total})</div>
               </div>
             ))}
+          </div>
+
+          <div className="panel-toolbar">
+            <div>
+              <div className="subsection-title">Source Health</div>
+              <div className="subsection-copy">Last 7 days of scraper performance</div>
+            </div>
+            <button className="refresh-btn" onClick={loadScraperHealth} disabled={healthLoading}>
+              {healthLoading ? 'Refreshing...' : 'Refresh'}
+            </button>
+          </div>
+
+          <div className="health-table-wrap">
+            <table className="health-table">
+              <thead>
+                <tr>
+                  <th>Source</th>
+                  <th>7-day success rate</th>
+                  <th>Avg response</th>
+                  <th>Last error</th>
+                  <th>Last checked</th>
+                </tr>
+              </thead>
+              <tbody>
+                {scraperHealth.map(row => (
+                  <tr key={row.source_name}>
+                    <td>{row.display_name || HEALTH_SOURCE_LABELS[row.source_name] || row.source_name}</td>
+                    <td>
+                      <span className={`health-rate ${getHealthTone(row)}`}>
+                        {row.total_attempts ? `${row.success_rate_pct}%` : '—'}
+                      </span>
+                    </td>
+                    <td>{row.average_response_time_ms != null ? `${row.average_response_time_ms} ms` : '—'}</td>
+                    <td title={row.last_seen_error || 'No recent errors'}>{truncateText(row.last_seen_error)}</td>
+                    <td>{formatCheckedAt(row.last_checked)}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
           </div>
 
           {stats.last10?.length > 0 && (

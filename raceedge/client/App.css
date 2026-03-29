@@ -136,6 +136,107 @@ input:focus, select:focus { border-color: #f59e0b; }
 .pnl-pos { color: #4ade80 !important; }
 .pnl-neg { color: #f87171 !important; }
 
+.panel-toolbar {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 12px;
+  margin-bottom: 12px;
+}
+
+.subsection-title {
+  font-size: 0.86rem;
+  font-weight: 700;
+  color: var(--text-primary);
+}
+
+.subsection-copy {
+  font-size: 0.78rem;
+  color: var(--text-muted);
+  margin-top: 2px;
+}
+
+.refresh-btn {
+  background: var(--bg-input);
+  border: 1px solid var(--border-input);
+  color: var(--text-secondary);
+  border-radius: 8px;
+  padding: 8px 12px;
+  cursor: pointer;
+  font-size: 0.8rem;
+  white-space: nowrap;
+}
+
+.refresh-btn:hover:not(:disabled) {
+  border-color: var(--accent);
+  color: var(--text-primary);
+}
+
+.refresh-btn:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+.health-table-wrap {
+  overflow-x: auto;
+  margin-bottom: 20px;
+}
+
+.health-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.82rem;
+}
+
+.health-table th {
+  text-align: left;
+  color: var(--text-muted);
+  padding: 8px;
+  border-bottom: 1px solid var(--border);
+  font-weight: 500;
+}
+
+.health-table td {
+  padding: 8px;
+  border-bottom: 1px solid var(--table-border);
+  color: var(--text-content);
+  vertical-align: top;
+}
+
+.health-rate {
+  display: inline-block;
+  min-width: 68px;
+  text-align: center;
+  padding: 4px 10px;
+  border-radius: 999px;
+  font-size: 0.74rem;
+  font-weight: 700;
+}
+
+.health-rate.good {
+  background: #052e16;
+  color: #4ade80;
+  border: 1px solid #166534;
+}
+
+.health-rate.warn {
+  background: #451a03;
+  color: #fbbf24;
+  border: 1px solid #b45309;
+}
+
+.health-rate.bad {
+  background: #1c0a0a;
+  color: #f87171;
+  border: 1px solid #991b1b;
+}
+
+.health-rate.unknown {
+  background: var(--bg-input);
+  color: var(--text-muted);
+  border: 1px solid var(--border-input);
+}
+
 /* Predictions table */
 .preds-table { width: 100%; border-collapse: collapse; font-size: 0.82rem; }
 .preds-table th { text-align: left; color: var(--text-muted); padding: 8px; border-bottom: 1px solid var(--border); font-weight: 500; }
@@ -191,6 +292,10 @@ input:focus, select:focus { border-color: #f59e0b; }
   .runner-name { font-size: 1.2rem; }
   .record-row { flex-direction: column; align-items: stretch; }
   .result-btn { width: 100%; }
+  .panel-toolbar { flex-direction: column; align-items: stretch; }
+  .refresh-btn { width: 100%; }
+  .health-table { font-size: 0.74rem; }
+  .health-table th, .health-table td { padding: 6px 5px; }
   .preds-table { font-size: 0.72rem; }
   .preds-table th, .preds-table td { padding: 5px 4px; }
 }
