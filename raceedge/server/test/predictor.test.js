@@ -72,6 +72,32 @@ describe('scoreBoxDraw', () => {
     assert.equal(wide, 45)
     assert.ok(inside > wide)
   })
+
+  test('uses empirical box bias data when the selected box has at least 10 samples', () => {
+    const boxBiasData = {
+      boxes: [
+        { box: 3, total_predictions: 12, win_count: 4, win_rate_pct: 28.5 },
+      ],
+    }
+
+    assert.equal(
+      scoreBoxDraw({ name: 'Empirical Edge', box: 3, distanceMeters: 320, raceType: 'greyhound' }, boxBiasData),
+      86
+    )
+  })
+
+  test('falls back to the default box map when empirical data is insufficient for that box', () => {
+    const boxBiasData = {
+      boxes: [
+        { box: 3, total_predictions: 9, win_count: 3, win_rate_pct: 33.3 },
+      ],
+    }
+
+    assert.equal(
+      scoreBoxDraw({ name: 'Fallback Dog', box: 3, distanceMeters: 320, raceType: 'greyhound' }, boxBiasData),
+      65
+    )
+  })
 })
 
 describe('scoreClassConsistency', () => {
@@ -301,6 +327,39 @@ describe('applyMode', () => {
     const result = applyMode(field, 'safest')
     assert.equal(result.allScores.length, field.length)
     assert.ok(result.allScores[0].breakdown)
+  })
+
+  test('surfaces the empirical box bias source when the winning runner used it', () => {
+    const result = applyMode([
+      {
+        name: 'Empirical Leader',
+        box: 1,
+        distanceMeters: 320,
+        lastStarts: '1-1-2-1-2-1',
+        bestTime: 18.6,
+        trainerStrike: 20,
+        careerTop3Pct: 70,
+        daysSinceLastRun: 9,
+        boxBiasData: {
+          boxes: [
+            { box: 1, total_predictions: 12, win_count: 4, win_rate_pct: 28 },
+          ],
+        },
+      },
+      {
+        name: 'Standard Runner',
+        box: 8,
+        distanceMeters: 320,
+        lastStarts: '4-5-4-5-4-5',
+        bestTime: 19.1,
+        trainerStrike: 6,
+        careerTop3Pct: 25,
+        daysSinceLastRun: 20,
+      },
+    ], 'safest')
+
+    assert.equal(result.boxBiasSource, 'empirical')
+    assert.equal(result.allScores[0].boxBiasSource, 'empirical')
   })
 
   test('throws for unrecognised mode', () => {

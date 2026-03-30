@@ -11,12 +11,47 @@ const {
   getStats,
   logScraperHealth,
   getScraperStats,
+  getBoxBiasStats,
+  saveJournalEntry,
+  getJournalEntry,
+  getJournalHistory,
 } = require('../database.js')
 
 let db
+let predictionSeed = 0
 
 before(() => { db = initDb() })
 after(() => { db.close() })
+
+function saveSettledPrediction({
+  date = '2026-03-29',
+  track = 'Richmond',
+  race_number = 1,
+  race_type = 'greyhound',
+  runner = `Runner ${++predictionSeed}`,
+  box_barrier = 1,
+  mode = 'safest',
+  confidence = 0.7,
+  stake = 10,
+  race_distance = 320,
+  result = 'win',
+  odds = 2.5,
+} = {}) {
+  const saved = savePrediction(db, {
+    date,
+    track,
+    race_number,
+    race_type,
+    runner,
+    box_barrier,
+    mode,
+    confidence,
+    stake,
+    race_distance,
+  })
+
+  return updateResult(db, saved.id, result, result === 'win' ? odds : odds)
+}
 
 describe('savePrediction', () => {
   test('saves a prediction and returns it with an id', () => {
@@ -217,5 +252,162 @@ describe('scraper health', () => {
     assert.equal(racenet.average_response_time_ms, 300)
     assert.equal(racenet.last_seen_error, 'Bad gateway')
     assert.ok(racenet.last_checked)
+  })
+})
+
+describe('box bias stats', () => {
+  beforeEach(() => {
+    db.exec('DELETE FROM predictions')
+  })
+
+  test('getBoxBiasStats returns null when fewer than 10 samples match the track and distance window', () => {
+    for (let index = 0; index < 9; index += 1) {
+      saveSettledPrediction({
+        track: 'Richmond',
+        race_number: index + 1,
+        race_distance: 320,
+        box_barrier: index % 2 === 0 ? 1 : 2,
+        result: index < 3 ? 'win' : 'loss',
+      })
+    }
+
+    saveSettledPrediction({
+      track: 'Wentworth Park',
+      race_distance: 320,
+      box_barrier: 1,
+      result: 'win',
+    })
+
+    assert.equal(getBoxBiasStats(db, 'Richmond', 320), null)
+  })
+
+  test('getBoxBiasStats returns correct win rates with enough filtered history', () => {
+    const boxOneResults = ['win', 'win', 'win', 'loss', 'loss', 'loss']
+    boxOneResults.forEach((result, index) => {
+      saveSettledPrediction({
+        track: 'Richmond',
+        race_number: index + 1,
+        race_distance: 320,
+        box_barrier: 1,
+        result,
+      })
+    })
+
+    const boxTwoResults = ['win', 'loss', 'loss', 'loss']
+    boxTwoResults.forEach((result, index) => {
+      saveSettledPrediction({
+        track: 'Richmond',
+        race_number: index + 11,
+        race_distance: 345,
+        box_barrier: 2,
+        result,
+      })
+    })
+
+    saveSettledPrediction({
+      track: 'Richmond',
+      race_distance: 430,
+      box_barrier: 3,
+      result: 'win',
+    })
+    saveSettledPrediction({
+      track: 'Sandown Park',
+      race_distance: 320,
+      box_barrier: 1,
+      result: 'win',
+    })
+
+    const stats = getBoxBiasStats(db, 'Richmond', 320)
+
+    assert.ok(stats)
+    assert.equal(stats.track, 'Richmond')
+    assert.equal(stats.distance, 320)
+    assert.equal(stats.total_results, 10)
+    assert.deepEqual(stats.boxes, [
+      { box: 1, total_predictions: 6, win_count: 3, win_rate_pct: 50 },
+      { box: 2, total_predictions: 4, win_count: 1, win_rate_pct: 25 },
+    ])
+  })
+})
+
+describe('prediction journal', () => {
+  beforeEach(() => {
+    db.exec('DELETE FROM prediction_journal')
+    db.exec('DELETE FROM predictions')
+  })
+
+  test('saveJournalEntry and getJournalEntry round-trip correctly', () => {
+    const prediction = savePrediction(db, {
+      date: '2026-03-29',
+      track: 'Richmond',
+      race_number: 7,
+      race_type: 'greyhound',
+      runner: 'Journal Star',
+      box_barrier: 3,
+      mode: 'value',
+      confidence: 81,
+      race_distance: 320,
+    })
+
+    saveJournalEntry(db, {
+      prediction_id: prediction.id,
+      race_date: '2026-03-29',
+      track: 'Richmond',
+      race_number: 7,
+      race_distance: 320,
+      all_runners_json: [
+        { name: 'Journal Star', score: 81, breakdown: { bestTime: 74 } },
+        { name: 'Late Split', score: 70, breakdown: { bestTime: 62 } },
+      ],
+      sources_consulted_json: [
+        { source: 'thedogs.com.au', status: 'success', recordsReturned: 8 },
+        { source: 'tab.com.au', status: 'empty', recordsReturned: 0 },
+      ],
+      winner_name: 'Journal Star',
+      winner_box: 3,
+      winner_composite_score: 81,
+      winner_breakdown_json: {
+        recentForm: 88,
+        bestTime: 74,
+        boxDraw: 65,
+        classConsistency: 72,
+        trainerStrikeRate: 50,
+        daysSinceLastRun: 85,
+      },
+      mode_used: 'value',
+      box_bias_source: 'empirical',
+      raw_data_summary: 'thedogs.com.au: success (8 runners)\ntab.com.au: empty (0 runners)',
+    })
+
+    const entry = getJournalEntry(db, prediction.id)
+    const history = getJournalHistory(db, 1)
+
+    assert.ok(entry)
+    assert.equal(entry.prediction_id, prediction.id)
+    assert.equal(entry.track, 'Richmond')
+    assert.equal(entry.race_distance, 320)
+    assert.equal(entry.winner_name, 'Journal Star')
+    assert.equal(entry.winner_box, 3)
+    assert.equal(entry.winner_composite_score, 81)
+    assert.equal(entry.mode_used, 'value')
+    assert.equal(entry.box_bias_source, 'empirical')
+    assert.deepEqual(entry.all_runners, [
+      { name: 'Journal Star', score: 81, breakdown: { bestTime: 74 } },
+      { name: 'Late Split', score: 70, breakdown: { bestTime: 62 } },
+    ])
+    assert.deepEqual(entry.sources_consulted, [
+      { source: 'thedogs.com.au', status: 'success', recordsReturned: 8 },
+      { source: 'tab.com.au', status: 'empty', recordsReturned: 0 },
+    ])
+    assert.deepEqual(entry.winner_breakdown, {
+      recentForm: 88,
+      bestTime: 74,
+      boxDraw: 65,
+      classConsistency: 72,
+      trainerStrikeRate: 50,
+      daysSinceLastRun: 85,
+    })
+    assert.equal(history.length, 1)
+    assert.equal(history[0].prediction_id, prediction.id)
   })
 })

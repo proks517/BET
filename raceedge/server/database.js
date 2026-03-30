@@ -18,6 +18,7 @@ const SCHEMA = `
     odds        REAL,
     stake       REAL NOT NULL DEFAULT 10,
     pnl         REAL,
+    race_distance INTEGER,
     created_at  TEXT NOT NULL DEFAULT (datetime('now'))
   );
 
@@ -32,21 +33,76 @@ const SCHEMA = `
     records_returned INTEGER NOT NULL DEFAULT 0,
     error_message    TEXT,
     checked_at       TEXT NOT NULL DEFAULT (datetime('now'))
+  );
+
+  CREATE TABLE IF NOT EXISTS prediction_journal (
+    id                     INTEGER PRIMARY KEY AUTOINCREMENT,
+    prediction_id          INTEGER NOT NULL,
+    race_date              TEXT NOT NULL,
+    track                  TEXT NOT NULL,
+    race_number            INTEGER NOT NULL,
+    race_distance          INTEGER,
+    all_runners_json       TEXT NOT NULL,
+    sources_consulted_json TEXT NOT NULL,
+    winner_name            TEXT NOT NULL,
+    winner_box             INTEGER,
+    winner_composite_score INTEGER NOT NULL,
+    winner_breakdown_json  TEXT NOT NULL,
+    mode_used              TEXT NOT NULL,
+    box_bias_source        TEXT,
+    raw_data_summary       TEXT NOT NULL,
+    created_at             TEXT NOT NULL DEFAULT (datetime('now')),
+    FOREIGN KEY (prediction_id) REFERENCES predictions(id)
   )
 `
+
+function hasColumn(db, tableName, columnName) {
+  return db.prepare(`PRAGMA table_info(${tableName})`).all().some(column => column.name === columnName)
+}
+
+function ensureColumn(db, tableName, columnName, definition) {
+  if (!hasColumn(db, tableName, columnName)) {
+    db.exec(`ALTER TABLE ${tableName} ADD COLUMN ${columnName} ${definition}`)
+  }
+}
+
+function parseJsonColumn(value, fallback) {
+  if (!value) return fallback
+  try {
+    return JSON.parse(value)
+  } catch {
+    return fallback
+  }
+}
+
+function parseJournalRow(row) {
+  if (!row) return undefined
+  return {
+    ...row,
+    race_distance: row.race_distance == null ? null : Number(row.race_distance),
+    winner_box: row.winner_box == null ? null : Number(row.winner_box),
+    winner_composite_score: Number(row.winner_composite_score),
+    all_runners: parseJsonColumn(row.all_runners_json, []),
+    sources_consulted: parseJsonColumn(row.sources_consulted_json, []),
+    winner_breakdown: parseJsonColumn(row.winner_breakdown_json, {}),
+  }
+}
 
 function initDb() {
   const db = new Database(DB_PATH)
   db.pragma('journal_mode = WAL')
   db.exec(SCHEMA)
+  ensureColumn(db, 'predictions', 'race_distance', 'INTEGER')
+  ensureColumn(db, 'prediction_journal', 'race_distance', 'INTEGER')
+  ensureColumn(db, 'prediction_journal', 'box_bias_source', 'TEXT')
   return db
 }
 
-function savePrediction(db, { date, track, race_number, race_type, runner, box_barrier, mode, confidence, stake = 10 }) {
+function savePrediction(db, { date, track, race_number, race_type, runner, box_barrier, mode, confidence, stake = 10, race_distance = null }) {
   const info = db.prepare(`
-    INSERT INTO predictions (date, track, race_number, race_type, runner, box_barrier, mode, confidence, stake)
-    VALUES (@date, @track, @race_number, @race_type, @runner, @box_barrier, @mode, @confidence, @stake)
-  `).run({ date, track, race_number, race_type, runner, box_barrier, mode, confidence, stake })
+    INSERT INTO predictions (date, track, race_number, race_type, runner, box_barrier, mode, confidence, stake, race_distance)
+    VALUES (@date, @track, @race_number, @race_type, @runner, @box_barrier, @mode, @confidence, @stake, @race_distance)
+  `).run({ date, track, race_number, race_type, runner, box_barrier, mode, confidence, stake, race_distance })
   return db.prepare('SELECT * FROM predictions WHERE id = ?').get(info.lastInsertRowid)
 }
 
@@ -169,6 +225,118 @@ function getScraperStats(db) {
   }))
 }
 
+function getBoxBiasStats(db, track, distance) {
+  const normalizedDistance = Number(distance)
+  if (!track || !Number.isFinite(normalizedDistance)) return null
+
+  const rows = db.prepare(`
+    SELECT
+      box_barrier AS box,
+      COUNT(*) AS total_predictions,
+      SUM(CASE WHEN result = 'win' THEN 1 ELSE 0 END) AS win_count,
+      ROUND(
+        CASE
+          WHEN COUNT(*) = 0 THEN 0
+          ELSE (SUM(CASE WHEN result = 'win' THEN 1.0 ELSE 0 END) / COUNT(*)) * 100
+        END,
+        1
+      ) AS win_rate_pct
+    FROM predictions
+    WHERE lower(track) = lower(?)
+      AND race_distance IS NOT NULL
+      AND ABS(race_distance - ?) <= 50
+      AND box_barrier BETWEEN 1 AND 8
+      AND result IN ('win', 'loss')
+    GROUP BY box_barrier
+    ORDER BY box_barrier
+  `).all(track, normalizedDistance)
+
+  const totalResults = rows.reduce((sum, row) => sum + Number(row.total_predictions), 0)
+  if (totalResults < 10) return null
+
+  return {
+    track,
+    distance: normalizedDistance,
+    total_results: totalResults,
+    boxes: rows.map(row => ({
+      box: Number(row.box),
+      total_predictions: Number(row.total_predictions),
+      win_count: Number(row.win_count),
+      win_rate_pct: Number(row.win_rate_pct),
+    })),
+  }
+}
+
+function saveJournalEntry(db, entry) {
+  const info = db.prepare(`
+    INSERT INTO prediction_journal (
+      prediction_id,
+      race_date,
+      track,
+      race_number,
+      race_distance,
+      all_runners_json,
+      sources_consulted_json,
+      winner_name,
+      winner_box,
+      winner_composite_score,
+      winner_breakdown_json,
+      mode_used,
+      box_bias_source,
+      raw_data_summary
+    )
+    VALUES (
+      @prediction_id,
+      @race_date,
+      @track,
+      @race_number,
+      @race_distance,
+      @all_runners_json,
+      @sources_consulted_json,
+      @winner_name,
+      @winner_box,
+      @winner_composite_score,
+      @winner_breakdown_json,
+      @mode_used,
+      @box_bias_source,
+      @raw_data_summary
+    )
+  `).run({
+    ...entry,
+    race_distance: entry.race_distance ?? null,
+    winner_box: entry.winner_box ?? null,
+    all_runners_json: JSON.stringify(entry.all_runners_json ?? []),
+    sources_consulted_json: JSON.stringify(entry.sources_consulted_json ?? []),
+    winner_breakdown_json: JSON.stringify(entry.winner_breakdown_json ?? {}),
+    box_bias_source: entry.box_bias_source ?? null,
+  })
+
+  return db.prepare('SELECT * FROM prediction_journal WHERE id = ?').get(info.lastInsertRowid)
+}
+
+function getJournalEntry(db, predictionId) {
+  const row = db.prepare(`
+    SELECT *
+    FROM prediction_journal
+    WHERE prediction_id = ?
+    ORDER BY id DESC
+    LIMIT 1
+  `).get(predictionId)
+
+  return parseJournalRow(row)
+}
+
+function getJournalHistory(db, limit = 20) {
+  const rows = db.prepare(`
+    SELECT *
+    FROM prediction_journal
+    ORDER BY id DESC
+    LIMIT ?
+  `).all(limit)
+
+  return rows.map(parseJournalRow)
+}
+
 module.exports = {
   initDb,
   savePrediction,
@@ -177,4 +345,8 @@ module.exports = {
   getStats,
   logScraperHealth,
   getScraperStats,
+  getBoxBiasStats,
+  saveJournalEntry,
+  getJournalEntry,
+  getJournalHistory,
 }

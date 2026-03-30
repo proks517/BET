@@ -85,6 +85,29 @@ function getDistanceMeters(runner) {
   )
 }
 
+function getGreyhoundBoxProfile(distance) {
+  if (distance == null) return GREYHOUND_BOX_SCORES.middle
+  if (distance <= 320) return GREYHOUND_BOX_SCORES.sprint
+  if (distance <= 430) return GREYHOUND_BOX_SCORES.middle
+  return GREYHOUND_BOX_SCORES.staying
+}
+
+function getDefaultBoxBiasTable(distance) {
+  const profile = getGreyhoundBoxProfile(toNumber(distance))
+  const total = Object.values(profile).reduce((sum, score) => sum + score, 0)
+
+  return {
+    source: 'default',
+    boxes: Object.entries(profile).map(([box, score]) => ({
+      box: Number(box),
+      total_predictions: 0,
+      win_count: 0,
+      win_rate_pct: roundScore((score / total) * 100),
+      default_score: score,
+    })),
+  }
+}
+
 function getDaysSinceLastRunValue(runner) {
   const explicitDays = toNumber(runner.daysSinceLastRun)
   if (explicitDays != null) return explicitDays
@@ -161,12 +184,24 @@ function scoreBestTime(runner, fieldAvgTime) {
   return roundScore(interpolate(Math.min(Math.abs(diff), 1.0), 0, 1.0, 59, 20))
 }
 
-function scoreBoxDraw(runner) {
+function getBoxDrawEvaluation(runner, boxBiasData = runner.boxBiasData) {
   const raceType = inferRaceType(runner)
+  const box = toNumber(runner.box ?? runner.barrier)
+
+  if (boxBiasData?.boxes && box != null) {
+    const empiricalBox = boxBiasData.boxes.find(entry => Number(entry.box) === Math.round(box))
+    if (empiricalBox && Number(empiricalBox.total_predictions) >= 10) {
+      const score = roundScore(clamp(Number(empiricalBox.win_rate_pct) * 3, 0, 100))
+      console.log(`[Predictor] Box draw mode: empirical (${runner.name || `box ${box}`})`)
+      return { score, source: 'empirical' }
+    }
+  }
+
+  console.log(`[Predictor] Box draw mode: default (${runner.name || `box ${box ?? 'n/a'}`})`)
 
   if (raceType === 'horse') {
     const barrier = toNumber(runner.barrier ?? runner.box)
-    if (barrier == null) return 50
+    if (barrier == null) return { score: 50, source: 'default' }
 
     const fieldSize = Math.max(
       toNumber(runner.fieldSize) || 0,
@@ -174,25 +209,22 @@ function scoreBoxDraw(runner) {
       8
     )
 
-    if (fieldSize <= 1) return 70
+    if (fieldSize <= 1) return { score: 70, source: 'default' }
 
     const insideAdvantage = 1 - ((barrier - 1) / Math.max(fieldSize - 1, 1))
-    return roundScore(45 + (insideAdvantage * 35))
+    return { score: roundScore(45 + (insideAdvantage * 35)), source: 'default' }
   }
 
-  const box = toNumber(runner.box ?? runner.barrier)
-  if (box == null) return 50
+  if (box == null) return { score: 50, source: 'default' }
 
   const distance = getDistanceMeters(runner)
-  const profile = distance == null
-    ? GREYHOUND_BOX_SCORES.middle
-    : distance <= 320
-      ? GREYHOUND_BOX_SCORES.sprint
-      : distance <= 430
-        ? GREYHOUND_BOX_SCORES.middle
-        : GREYHOUND_BOX_SCORES.staying
+  const profile = getGreyhoundBoxProfile(distance)
 
-  return profile[Math.round(box)] ?? 50
+  return { score: profile[Math.round(box)] ?? 50, source: 'default' }
+}
+
+function scoreBoxDraw(runner, boxBiasData = runner.boxBiasData) {
+  return getBoxDrawEvaluation(runner, boxBiasData).score
 }
 
 function scoreClassConsistency(runner) {
@@ -238,15 +270,24 @@ function scoreDaysSinceLastRun(runner) {
   return 55
 }
 
-function buildScoreBreakdown(runner, fieldAvgTime) {
+function buildScoreProfile(runner, fieldAvgTime) {
+  const boxDraw = getBoxDrawEvaluation(runner, runner.boxBiasData)
+
   return {
-    recentForm: scoreRecentForm(runner),
-    bestTime: scoreBestTime(runner, fieldAvgTime),
-    boxDraw: scoreBoxDraw(runner),
-    classConsistency: scoreClassConsistency(runner),
-    trainerStrikeRate: scoreTrainerStrikeRate(runner),
-    daysSinceLastRun: scoreDaysSinceLastRun(runner),
+    breakdown: {
+      recentForm: scoreRecentForm(runner),
+      bestTime: scoreBestTime(runner, fieldAvgTime),
+      boxDraw: boxDraw.score,
+      classConsistency: scoreClassConsistency(runner),
+      trainerStrikeRate: scoreTrainerStrikeRate(runner),
+      daysSinceLastRun: scoreDaysSinceLastRun(runner),
+    },
+    boxBiasSource: boxDraw.source,
   }
+}
+
+function buildScoreBreakdown(runner, fieldAvgTime) {
+  return buildScoreProfile(runner, fieldAvgTime).breakdown
 }
 
 function getCompositeScore(breakdown) {
@@ -309,7 +350,7 @@ function buildScoredEntry(runner, fieldAvgTime, fieldSize) {
     ...runner,
     fieldSize: runner.fieldSize ?? fieldSize,
   }
-  const breakdown = buildScoreBreakdown(enrichedRunner, fieldAvgTime)
+  const { breakdown, boxBiasSource } = buildScoreProfile(enrichedRunner, fieldAvgTime)
   const compositeScore = getCompositeScore(breakdown)
 
   return {
@@ -318,6 +359,7 @@ function buildScoredEntry(runner, fieldAvgTime, fieldSize) {
     compositeScore,
     score: compositeScore,
     confidence: Math.min(92, Math.round((compositeScore / MAX_COMPOSITE_SCORE) * 100)),
+    boxBiasSource,
   }
 }
 
@@ -370,7 +412,15 @@ function applyMode(runners, mode) {
     score: selected.compositeScore,
     compositeScore: selected.compositeScore,
     confidence: selected.confidence,
-    breakdown: selected.breakdown,
+    breakdown: {
+      recentForm: selected.breakdown.recentForm,
+      bestTime: selected.breakdown.bestTime,
+      boxDraw: selected.breakdown.boxDraw,
+      classConsistency: selected.breakdown.classConsistency,
+      trainerStrikeRate: selected.breakdown.trainerStrikeRate,
+      daysSinceLastRun: selected.breakdown.daysSinceLastRun,
+    },
+    boxBiasSource: selected.boxBiasSource,
     mode,
     reasoning,
     allScores: scored.map(entry => ({
@@ -381,7 +431,15 @@ function applyMode(runners, mode) {
       score: entry.compositeScore,
       compositeScore: entry.compositeScore,
       confidence: entry.confidence,
-      breakdown: entry.breakdown,
+      breakdown: {
+        recentForm: entry.breakdown.recentForm,
+        bestTime: entry.breakdown.bestTime,
+        boxDraw: entry.breakdown.boxDraw,
+        classConsistency: entry.breakdown.classConsistency,
+        trainerStrikeRate: entry.breakdown.trainerStrikeRate,
+        daysSinceLastRun: entry.breakdown.daysSinceLastRun,
+      },
+      boxBiasSource: entry.boxBiasSource,
     })),
   }
 }
@@ -389,6 +447,7 @@ function applyMode(runners, mode) {
 module.exports = {
   FACTOR_WEIGHTS,
   buildScoreBreakdown,
+  getDefaultBoxBiasTable,
   scoreRunner,
   scoreRecentForm,
   scoreBestTime,

@@ -8,9 +8,13 @@ const {
   updateResult,
   getStats,
   getScraperStats,
+  getBoxBiasStats,
+  saveJournalEntry,
+  getJournalEntry,
+  getJournalHistory,
 } = require('./database.js')
 const { research, fetchMeetings, closeBrowser } = require('./scraper.js')
-const { applyMode } = require('./predictor.js')
+const { applyMode, getDefaultBoxBiasTable } = require('./predictor.js')
 
 const app  = express()
 const PORT = process.env.PORT || 3001
@@ -54,7 +58,7 @@ app.get('/api/races', (req, res) => {
 
 // POST /api/research
 app.post('/api/research', async (req, res) => {
-  const { date, meeting, raceNumber, raceType, mode, stake } = req.body
+  const { date, meeting, raceNumber, raceType, mode, stake, distance } = req.body
   if (!date || !meeting || !raceNumber || !raceType || !mode) {
     return res.status(400).json({ error: 'date, meeting, raceNumber, raceType, mode are all required' })
   }
@@ -70,13 +74,26 @@ app.post('/api/research', async (req, res) => {
       })
     }
 
-    const prediction = applyMode(scrape.runners, mode)
+    const numericDistance = Number(distance)
+    const boxBiasStats = Number.isFinite(numericDistance)
+      ? getBoxBiasStats(db, meeting, numericDistance)
+      : null
+
+    const enrichedRunners = scrape.runners.map(runner => ({
+      ...runner,
+      distanceMeters: Number.isFinite(numericDistance) ? numericDistance : runner.distanceMeters,
+      raceType,
+      boxBiasData: boxBiasStats,
+    }))
+
+    const prediction = applyMode(enrichedRunners, mode)
 
     const saved = savePrediction(db, {
       date,
       track:       meeting,
       race_number: raceNumber,
       race_type:   raceType,
+      race_distance: Number.isFinite(numericDistance) ? numericDistance : null,
       runner:      prediction.runner.name,
       box_barrier: prediction.runner.box ?? prediction.runner.barrier ?? null,
       mode,
@@ -84,14 +101,54 @@ app.post('/api/research', async (req, res) => {
       stake:       stake || 10,
     })
 
+    const sourcesConsulted = scrape.sources.map(source => ({
+      source: source.source,
+      status: source.error
+        ? 'error'
+        : source.runners.length > 0
+          ? 'success'
+          : 'empty',
+      recordsReturned: source.runners.length,
+      error: source.error || null,
+    }))
+
+    const rawDataSummary = scrape.sources.map(source => {
+      const status = source.error
+        ? `error - ${source.error}`
+        : source.runners.length > 0
+          ? `success (${source.runners.length} runners)`
+          : 'empty (0 runners)'
+      return `${source.source}: ${status}`
+    }).join('\n')
+
+    saveJournalEntry(db, {
+      prediction_id: saved.id,
+      race_date: date,
+      track: meeting,
+      race_number: raceNumber,
+      race_distance: Number.isFinite(numericDistance) ? numericDistance : null,
+      all_runners_json: prediction.allScores,
+      sources_consulted_json: sourcesConsulted,
+      winner_name: prediction.runner.name,
+      winner_box: prediction.runner.box ?? prediction.runner.barrier ?? null,
+      winner_composite_score: prediction.score,
+      winner_breakdown_json: prediction.breakdown,
+      mode_used: mode,
+      box_bias_source: prediction.boxBiasSource,
+      raw_data_summary: rawDataSummary,
+    })
+
     res.json({
       predictionId:   saved.id,
       runner:         prediction.runner.name,
       box:            prediction.runner.box,
       barrier:        prediction.runner.barrier,
+      distance:       Number.isFinite(numericDistance) ? numericDistance : null,
       odds:           prediction.runner.odds,
       score:          prediction.score,
       confidence:     prediction.confidence,
+      breakdown:      prediction.breakdown,
+      boxBiasSource:  prediction.boxBiasSource,
       reasoning:      prediction.reasoning,
       allScores:      prediction.allScores,
       sourcesUsed:    scrape.sourcesUsed,
@@ -145,6 +202,73 @@ app.get('/api/stats', (req, res) => {
 app.get('/api/scraper-health', (req, res) => {
   try {
     res.json({ sources: getScraperStats(db) })
+  } catch (err) {
+    res.status(500).json({ error: err.message })
+  }
+})
+
+// GET /api/box-bias?track=<name>&distance=<meters>
+app.get('/api/box-bias', (req, res) => {
+  const { track, distance } = req.query
+  const numericDistance = Number(distance)
+  if (!track || !Number.isFinite(numericDistance)) {
+    return res.status(400).json({ error: 'track and numeric distance are required' })
+  }
+
+  try {
+    const stats = getBoxBiasStats(db, track, numericDistance)
+    const hasFullEmpiricalCoverage = stats &&
+      stats.boxes.length === 8 &&
+      stats.boxes.every(box => box.total_predictions >= 10)
+
+    if (!hasFullEmpiricalCoverage) {
+      const defaults = getDefaultBoxBiasTable(numericDistance)
+      return res.json({
+        source: 'default',
+        message: 'insufficient data',
+        track,
+        distance: numericDistance,
+        boxes: defaults.boxes.map(box => ({
+          box: box.box,
+          total_predictions: 0,
+          win_count: 0,
+          win_rate_pct: box.win_rate_pct,
+        })),
+      })
+    }
+
+    res.json({
+      source: 'empirical',
+      track,
+      distance: numericDistance,
+      boxes: stats.boxes,
+    })
+  } catch (err) {
+    res.status(500).json({ error: err.message })
+  }
+})
+
+// GET /api/journal?limit=20
+app.get('/api/journal', (req, res) => {
+  const limit = Number(req.query.limit) || 20
+  try {
+    res.json({ entries: getJournalHistory(db, limit) })
+  } catch (err) {
+    res.status(500).json({ error: err.message })
+  }
+})
+
+// GET /api/journal/:predictionId
+app.get('/api/journal/:predictionId', (req, res) => {
+  const predictionId = Number(req.params.predictionId)
+  if (!Number.isInteger(predictionId) || predictionId < 1) {
+    return res.status(400).json({ error: 'predictionId must be a positive integer' })
+  }
+
+  try {
+    const entry = getJournalEntry(db, predictionId)
+    if (!entry) return res.status(404).json({ error: 'Journal entry not found' })
+    res.json({ entry })
   } catch (err) {
     res.status(500).json({ error: err.message })
   }
