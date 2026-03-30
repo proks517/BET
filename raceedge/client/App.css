@@ -214,6 +214,9 @@ input:focus, select:focus { border-color: #f59e0b; }
 }
 
 .dashboard-tab {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
   background: var(--bg-input);
   border: 1px solid var(--border-input);
   color: var(--text-secondary);
@@ -234,6 +237,20 @@ input:focus, select:focus { border-color: #f59e0b; }
   background: linear-gradient(135deg, #f59e0b, #ef4444);
   border-color: transparent;
   color: #fff;
+}
+
+.dashboard-tab-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 22px;
+  height: 22px;
+  padding: 0 7px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.18);
+  color: inherit;
+  font-size: 0.7rem;
+  font-weight: 800;
 }
 
 .subsection-title {
@@ -267,6 +284,33 @@ input:focus, select:focus { border-color: #f59e0b; }
 .refresh-btn:disabled {
   opacity: 0.55;
   cursor: not-allowed;
+}
+
+.toolbar-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.pending-pill {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 36px;
+  padding: 8px 14px;
+  border-radius: 999px;
+  border: 1px solid var(--border-input);
+  background: var(--bg-input);
+  color: var(--text-secondary);
+  font-size: 0.78rem;
+  font-weight: 700;
+}
+
+.pending-pill.active {
+  border-color: #2563eb;
+  background: #1e3a5f;
+  color: #93c5fd;
 }
 
 .health-table-wrap {
@@ -425,6 +469,12 @@ input:focus, select:focus { border-color: #f59e0b; }
 .preds-table th { text-align: left; color: var(--text-muted); padding: 8px; border-bottom: 1px solid var(--border); font-weight: 500; }
 .preds-table td { padding: 8px; border-bottom: 1px solid var(--table-border); color: var(--text-content); }
 
+.result-origin-icon {
+  margin-left: 8px;
+  font-size: 0.9rem;
+  vertical-align: middle;
+}
+
 /* Badges */
 .badge { display: inline-block; padding: 2px 8px; border-radius: 20px; font-size: 0.72rem; font-weight: 700; }
 .badge.win       { background: #052e16; color: #4ade80; }
@@ -446,6 +496,34 @@ input:focus, select:focus { border-color: #f59e0b; }
 .error-dismiss {
   background: none; border: 1px solid #fca5a5; color: #fca5a5;
   border-radius: 6px; padding: 4px 10px; cursor: pointer; font-size: 0.8rem; white-space: nowrap;
+}
+
+.notice-toast {
+  position: fixed;
+  bottom: 20px;
+  left: 50%;
+  transform: translateX(-50%);
+  border-radius: 10px;
+  padding: 12px 20px;
+  font-size: 0.88rem;
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  z-index: 1000;
+  animation: slideUp 0.3s ease;
+  max-width: 90vw;
+}
+
+.notice-toast.info,
+.notice-toast.success {
+  background: #052e16;
+  border: 1px solid #166534;
+  color: #bbf7d0;
+}
+
+.notice-toast .error-dismiss {
+  border-color: #86efac;
+  color: #bbf7d0;
 }
 @keyframes slideUp { from { transform: translateX(-50%) translateY(20px); opacity: 0; } to { transform: translateX(-50%); opacity: 1; } }
 
@@ -477,6 +555,8 @@ input:focus, select:focus { border-color: #f59e0b; }
   .result-btn { width: 100%; }
   .panel-toolbar { flex-direction: column; align-items: stretch; }
   .refresh-btn { width: 100%; }
+  .toolbar-actions { width: 100%; flex-direction: column; align-items: stretch; }
+  .pending-pill { width: 100%; border-radius: 10px; }
   .dashboard-tabs { gap: 6px; }
   .dashboard-tab { width: 100%; }
   .health-table { font-size: 0.74rem; }

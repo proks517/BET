@@ -72,6 +72,10 @@ function formatModeLabel(mode) {
   return mode ? mode.charAt(0).toUpperCase() + mode.slice(1) : '—'
 }
 
+function formatPredictionResult(result) {
+  return result || 'pending'
+}
+
 function mergeScraperHealthRows(rows = []) {
   const bySource = new Map(rows.map(row => [row.source_name, row]))
   const knownRows = SCRAPER_HEALTH_SOURCES.map(source_name => ({
@@ -111,6 +115,7 @@ function App() {
   const [activeSourceIdx, setActiveSourceIdx] = useState(-1)
   const [result,     setResult]     = useState(null)
   const [error,      setError]      = useState('')
+  const [notice,     setNotice]     = useState(null)
   const [theme,      setTheme]      = useState(() => localStorage.getItem('raceedge-theme') || 'dark')
 
   // Record result
@@ -122,6 +127,8 @@ function App() {
   const [stats,      setStats]      = useState(null)
   const [scraperHealth, setScraperHealth] = useState(() => mergeScraperHealthRows())
   const [healthLoading, setHealthLoading] = useState(false)
+  const [pendingPredictions, setPendingPredictions] = useState([])
+  const [checkingResults, setCheckingResults] = useState(false)
   const [dashboardTab, setDashboardTab] = useState('overview')
   const [boxBiasTrack, setBoxBiasTrack] = useState('')
   const [boxBiasDistance, setBoxBiasDistance] = useState(400)
@@ -142,6 +149,13 @@ function App() {
       .then(data => setScraperHealth(mergeScraperHealthRows(data.sources || [])))
       .catch(() => {})
       .finally(() => setHealthLoading(false))
+  }, [])
+
+  const loadPending = useCallback(() => {
+    fetch('/api/pending')
+      .then(r => r.json())
+      .then(data => setPendingPredictions(data.predictions || []))
+      .catch(() => {})
   }, [])
 
   const loadBoxBias = useCallback((track = boxBiasTrack, meters = boxBiasDistance) => {
@@ -166,8 +180,9 @@ function App() {
   useEffect(() => {
     loadStats()
     loadScraperHealth()
+    loadPending()
     loadJournal()
-  }, [loadStats, loadScraperHealth, loadJournal])
+  }, [loadStats, loadScraperHealth, loadPending, loadJournal])
 
   useEffect(() => {
     document.documentElement.setAttribute('data-theme', theme)
@@ -179,6 +194,12 @@ function App() {
     const timer = setTimeout(() => setError(''), 8000)
     return () => clearTimeout(timer)
   }, [error])
+
+  useEffect(() => {
+    if (!notice) return
+    const timer = setTimeout(() => setNotice(null), 6000)
+    return () => clearTimeout(timer)
+  }, [notice])
 
   useEffect(() => {
     document.title = result
@@ -243,6 +264,7 @@ function App() {
       setLoadMsg('')
       setActiveSourceIdx(-1)
       loadScraperHealth()
+      loadPending()
       loadJournal()
       setBoxBiasTrack(meeting)
       setBoxBiasDistance(distance)
@@ -261,10 +283,33 @@ function App() {
       if (!res.ok) throw new Error('Failed to record result')
       setRecorded(true)
       loadStats()
+      loadPending()
     } catch (e) {
       setError(e.message)
     } finally {
       setRecording(false)
+    }
+  }
+
+  async function handleCheckResults() {
+    setCheckingResults(true)
+    try {
+      const res = await fetch('/api/check-results', { method: 'POST' })
+      const data = await res.json()
+      if (!res.ok) throw new Error(data.error || 'Failed to check results')
+
+      const errorSuffix = data.errors?.length ? `, ${data.errors.length} error${data.errors.length === 1 ? '' : 's'}` : ''
+      setNotice({
+        kind: 'success',
+        message: `${data.checked} results checked, ${data.resolved} resolved automatically${errorSuffix}.`,
+      })
+
+      loadStats()
+      loadPending()
+    } catch (e) {
+      setError(e.message)
+    } finally {
+      setCheckingResults(false)
     }
   }
 
@@ -367,6 +412,13 @@ function App() {
         <div className="error-toast">
           <span>Warning: {error}</span>
           <button className="error-dismiss" onClick={() => setError('')}>Dismiss</button>
+        </div>
+      )}
+
+      {notice && (
+        <div className={`notice-toast ${notice.kind || 'info'}`}>
+          <span>{notice.message}</span>
+          <button className="error-dismiss" onClick={() => setNotice(null)}>Dismiss</button>
         </div>
       )}
 
@@ -486,6 +538,9 @@ function App() {
                 onClick={() => setDashboardTab(tab.key)}
               >
                 {tab.label}
+                {tab.key === 'overview' && pendingPredictions.length > 0 && (
+                  <span className="dashboard-tab-badge">{pendingPredictions.length}</span>
+                )}
               </button>
             ))}
           </div>
@@ -515,6 +570,21 @@ function App() {
                     <div className="stat-label">{t.race_type === 'greyhound' ? '🐕' : '🐎'} {t.race_type} ({t.total})</div>
                   </div>
                 ))}
+              </div>
+
+              <div className="panel-toolbar result-check-toolbar">
+                <div>
+                  <div className="subsection-title">Result Checker</div>
+                  <div className="subsection-copy">Past unresolved predictions waiting for automatic race outcomes</div>
+                </div>
+                <div className="toolbar-actions">
+                  <span className={`pending-pill ${pendingPredictions.length > 0 ? 'active' : ''}`}>
+                    Pending {pendingPredictions.length}
+                  </span>
+                  <button className="refresh-btn" onClick={handleCheckResults} disabled={checkingResults}>
+                    {checkingResults ? 'Checking...' : 'Check Results'}
+                  </button>
+                </div>
               </div>
 
               <div className="panel-toolbar">
@@ -565,20 +635,34 @@ function App() {
                         <tr><th>Date</th><th>Track</th><th>R</th><th>Runner</th><th>Mode</th><th>Odds</th><th>P&amp;L</th><th>Result</th></tr>
                       </thead>
                       <tbody>
-                        {stats.last10.map(p => (
-                          <tr key={p.id}>
-                            <td>{p.date}</td>
-                            <td>{p.track}</td>
-                            <td>{p.race_number}</td>
-                            <td>{p.runner}</td>
-                            <td><span className={`badge ${p.mode}`}>{p.mode}</span></td>
-                            <td>{p.odds ? `$${p.odds.toFixed(2)}` : '—'}</td>
-                            <td style={{ color: p.pnl > 0 ? '#4ade80' : p.pnl < 0 ? '#f87171' : undefined }}>
-                              {p.pnl != null ? `${p.pnl >= 0 ? '+' : ''}$${p.pnl.toFixed(2)}` : '—'}
-                            </td>
-                            <td><span className={`badge ${p.result}`}>{p.result}</span></td>
-                          </tr>
-                        ))}
+                        {stats.last10.map(p => {
+                          const resultStatus = formatPredictionResult(p.result)
+
+                          return (
+                            <tr key={p.id}>
+                              <td>{p.date}</td>
+                              <td>{p.track}</td>
+                              <td>{p.race_number}</td>
+                              <td>{p.runner}</td>
+                              <td><span className={`badge ${p.mode}`}>{p.mode}</span></td>
+                              <td>{p.odds ? `$${p.odds.toFixed(2)}` : '—'}</td>
+                              <td style={{ color: p.pnl > 0 ? '#4ade80' : p.pnl < 0 ? '#f87171' : undefined }}>
+                                {p.pnl != null ? `${p.pnl >= 0 ? '+' : ''}$${p.pnl.toFixed(2)}` : '—'}
+                              </td>
+                              <td>
+                                <span className={`badge ${resultStatus}`}>{resultStatus}</span>
+                                {resultStatus !== 'pending' && (
+                                  <span
+                                    className="result-origin-icon"
+                                    title={p.resolved_automatically ? 'Resolved automatically' : 'Recorded manually'}
+                                  >
+                                    {p.resolved_automatically ? '🤖' : '✋'}
+                                  </span>
+                                )}
+                              </td>
+                            </tr>
+                          )
+                        })}
                       </tbody>
                     </table>
                   </div>

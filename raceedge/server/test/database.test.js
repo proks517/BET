@@ -8,6 +8,8 @@ const {
   savePrediction,
   getPredictions,
   updateResult,
+  getPendingPredictions,
+  autoResolveResult,
   getStats,
   logScraperHealth,
   getScraperStats,
@@ -22,6 +24,11 @@ let predictionSeed = 0
 
 before(() => { db = initDb() })
 after(() => { db.close() })
+
+function dateOffset(days) {
+  return new Intl.DateTimeFormat('en-CA', { timeZone: 'Australia/Sydney' })
+    .format(new Date(Date.now() + (days * 24 * 60 * 60 * 1000)))
+}
 
 function saveSettledPrediction({
   date = '2026-03-29',
@@ -129,6 +136,120 @@ describe('getStats', () => {
     assert.ok(Array.isArray(stats.by_type))
     assert.ok(typeof stats.total_pnl === 'number')
     assert.ok(Array.isArray(stats.last10))
+  })
+})
+
+describe('pending prediction resolution', () => {
+  beforeEach(() => {
+    db.exec('DELETE FROM predictions')
+  })
+
+  test('getPendingPredictions only returns past unresolved predictions', () => {
+    savePrediction(db, {
+      date: dateOffset(-2),
+      track: 'Richmond',
+      race_number: 1,
+      race_type: 'greyhound',
+      runner: 'Past Pending',
+      box_barrier: 1,
+      mode: 'safest',
+      confidence: 0.7,
+    })
+
+    const settled = savePrediction(db, {
+      date: dateOffset(-2),
+      track: 'Richmond',
+      race_number: 2,
+      race_type: 'greyhound',
+      runner: 'Past Settled',
+      box_barrier: 2,
+      mode: 'value',
+      confidence: 0.66,
+    })
+    updateResult(db, settled.id, 'win', 3.4)
+
+    savePrediction(db, {
+      date: dateOffset(1),
+      track: 'Richmond',
+      race_number: 3,
+      race_type: 'greyhound',
+      runner: 'Future Pending',
+      box_barrier: 3,
+      mode: 'longshot',
+      confidence: 0.44,
+    })
+
+    const pending = getPendingPredictions(db)
+
+    assert.equal(pending.length, 1)
+    assert.equal(pending[0].runner, 'Past Pending')
+    assert.equal(pending[0].result, 'pending')
+  })
+
+  test('autoResolveResult correctly marks win when name matches', () => {
+    const prediction = savePrediction(db, {
+      date: dateOffset(-1),
+      track: 'Wentworth Park',
+      race_number: 4,
+      race_type: 'greyhound',
+      runner: 'Fast Dog',
+      box_barrier: 4,
+      mode: 'safest',
+      confidence: 0.79,
+      stake: 10,
+      odds: 3.4,
+    })
+
+    const resolved = autoResolveResult(db, prediction.id, '  fast dog  ')
+
+    assert.equal(resolved.result, 'win')
+    assert.equal(resolved.odds, 3.4)
+    assert.equal(resolved.pnl, 24)
+    assert.equal(resolved.resolved_automatically, true)
+    assert.equal(resolved.default_odds_used, false)
+  })
+
+  test('autoResolveResult correctly marks loss when name does not match', () => {
+    const prediction = savePrediction(db, {
+      date: dateOffset(-1),
+      track: 'Randwick',
+      race_number: 6,
+      race_type: 'horse',
+      runner: 'Silver Comet',
+      box_barrier: 6,
+      mode: 'value',
+      confidence: 0.61,
+      stake: 12,
+    })
+
+    const resolved = autoResolveResult(db, prediction.id, 'Golden Arrow')
+
+    assert.equal(resolved.result, 'loss')
+    assert.equal(resolved.pnl, -12)
+    assert.equal(resolved.resolved_automatically, true)
+    assert.equal(resolved.default_odds_used, false)
+  })
+
+  test('autoResolveResult sets resolved_automatically and default odds flags correctly', () => {
+    const prediction = savePrediction(db, {
+      date: dateOffset(-1),
+      track: 'Richmond',
+      race_number: 7,
+      race_type: 'greyhound',
+      runner: 'Need Odds',
+      box_barrier: 1,
+      mode: 'safest',
+      confidence: 0.74,
+      stake: 10,
+    })
+
+    const resolved = autoResolveResult(db, prediction.id, 'Need Odds')
+
+    assert.equal(resolved.result, 'win')
+    assert.equal(resolved.odds, 2)
+    assert.equal(resolved.pnl, 10)
+    assert.equal(resolved.resolved_automatically, true)
+    assert.equal(resolved.default_odds_used, true)
   })
 })
 

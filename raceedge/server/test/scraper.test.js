@@ -2,7 +2,12 @@ const { test, describe } = require('node:test')
 const assert = require('node:assert/strict')
 const fs = require('fs')
 const path = require('path')
-const { parseTheDogsHtml, parseRacingAndSportsHtml, mergeSources } = require('../scraper.js')
+const {
+  parseTheDogsHtml,
+  parseRacingAndSportsHtml,
+  fetchGreyhoundResult,
+  mergeSources,
+} = require('../scraper.js')
 
 const fix = p => fs.readFileSync(path.join(__dirname, 'fixtures', p), 'utf8')
 
@@ -50,5 +55,31 @@ describe('mergeSources', () => {
   test('returns empty array for empty input', () => {
     assert.deepEqual(mergeSources([]), [])
     assert.deepEqual(mergeSources([[]]), [])
+  })
+})
+
+describe('fetchGreyhoundResult', () => {
+  test('parses a saved results fixture correctly', async () => {
+    const originalFetch = global.fetch
+    const fixture = fix('thedogs-result.html')
+
+    global.fetch = async () => ({
+      ok: true,
+      status: 200,
+      text: async () => fixture,
+    })
+
+    try {
+      const result = await fetchGreyhoundResult('2026-03-29', 'Richmond', 8)
+
+      assert.deepEqual(result, {
+        winner: 'Rocket Boy',
+        second: 'Late Charger',
+        third: 'Inside Rail',
+        finished: true,
+      })
+    } finally {
+      global.fetch = originalFetch
+    }
   })
 })

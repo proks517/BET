@@ -82,6 +82,131 @@ function parseRacingAndSportsHtml(html) {
   return runners
 }
 
+function cleanText(value) {
+  return String(value || '')
+    .replace(/\s+/g, ' ')
+    .trim()
+}
+
+function slugifyTrack(track) {
+  return cleanText(track)
+    .toLowerCase()
+    .replace(/&/g, ' and ')
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+}
+
+function extractPlacingNumber(value) {
+  const text = cleanText(value).toLowerCase()
+  if (!text) return null
+  if (/\b(1|1st|first)\b/.test(text)) return 1
+  if (/\b(2|2nd|second)\b/.test(text)) return 2
+  if (/\b(3|3rd|third)\b/.test(text)) return 3
+  return null
+}
+
+function extractFinishers($) {
+  const finishers = new Map()
+  const rowSelectors = [
+    '.result-runner',
+    '.runner-result',
+    '.result-row',
+    '.finishing-order-row',
+    '.race-result tr',
+    '.results-table tr',
+    'table.results tr',
+    'table.race-results tr',
+    '.placings tbody tr',
+    '.finish-order li',
+    '.result-list li',
+    '[data-finish-position]',
+    '[data-position]',
+  ]
+
+  for (const selector of rowSelectors) {
+    $(selector).each((_, row) => {
+      if (finishers.size >= 3) return
+
+      const $row = $(row)
+      const position = extractPlacingNumber(
+        $row.attr('data-finish-position') ||
+        $row.attr('data-position') ||
+        $row.find('.finish-position, .position, .placing, .rank, .place, .finish, .result-position').first().text()
+      )
+      const name = cleanText(
+        $row.find('.runner-name, .dog-name, .horse-name, .competitor-name, .name, .runner, a').first().text()
+      )
+
+      if (position && position <= 3 && name && !finishers.has(position)) {
+        finishers.set(position, name)
+      }
+    })
+  }
+
+  const podiumSelectors = {
+    1: '.winner .runner-name, .winner .dog-name, .winner .horse-name, .winner .name',
+    2: '.second .runner-name, .second .dog-name, .second .horse-name, .second .name',
+    3: '.third .runner-name, .third .dog-name, .third .horse-name, .third .name',
+  }
+
+  for (const [position, selector] of Object.entries(podiumSelectors)) {
+    const name = cleanText($(selector).first().text())
+    if (name && !finishers.has(Number(position))) {
+      finishers.set(Number(position), name)
+    }
+  }
+
+  return finishers
+}
+
+function hasUnfinishedMarker($) {
+  const pageText = cleanText($('body').text()).toLowerCase()
+  const markers = [
+    'results pending',
+    'result pending',
+    'race has not run',
+    'race has not started',
+    'race not run',
+    'has not jumped',
+    'yet to run',
+    'upcoming race',
+    'jump time',
+    'acceptances',
+    'no results available',
+    'results unavailable',
+  ]
+
+  return markers.some(marker => pageText.includes(marker))
+}
+
+function parseRaceResultHtml(html) {
+  const $ = cheerio.load(html)
+  const finishers = extractFinishers($)
+
+  if (finishers.has(1)) {
+    return {
+      winner: finishers.get(1),
+      second: finishers.get(2) || null,
+      third: finishers.get(3) || null,
+      finished: true,
+    }
+  }
+
+  if (hasUnfinishedMarker($)) {
+    return { finished: false }
+  }
+
+  return { finished: false }
+}
+
+function parseGreyhoundResultHtml(html) {
+  return parseRaceResultHtml(html)
+}
+
+function parseHorseResultHtml(html) {
+  return parseRaceResultHtml(html)
+}
+
 // ── Source merging ────────────────────────────────────────────────────────────
 
 function mergeSources(sourceLists) {
@@ -114,6 +239,13 @@ const TRACK_STATE = {
   'angle park': 'SA',
 }
 
+async function fetchHtmlDocument(url) {
+  const res = await fetch(url, FETCH_OPTS)
+  if (res.status === 404) return null
+  if (!res.ok) throw new Error(`HTTP ${res.status}`)
+  return res.text()
+}
+
 async function fetchTheDogs(date, track, raceNumber) {
   const slug  = track.toLowerCase().replace(/\s+/g, '-')
   const state = TRACK_STATE[track.toLowerCase()] || 'VIC'
@@ -129,6 +261,25 @@ async function fetchTheDogs(date, track, raceNumber) {
     return result
   } catch (err) {
     return { source: 'thedogs.com.au', runners: [], error: err.message }
+  }
+}
+
+async function fetchGreyhoundResult(date, track, raceNumber) {
+  const key = cacheKey('thedogs-result', date, track, raceNumber)
+  const cached = getCached(key)
+  if (cached) return cached
+
+  const slug = slugifyTrack(track)
+  const url = `https://www.thedogs.com.au/racing/${slug}/${date}/${raceNumber}`
+
+  try {
+    const html = await fetchHtmlDocument(url)
+    if (html == null) return null
+    const parsed = parseGreyhoundResultHtml(html)
+    setCache(key, parsed)
+    return parsed
+  } catch {
+    return null
   }
 }
 
@@ -416,6 +567,56 @@ async function fetchPunters(date, track, raceNumber) {
   }
 }
 
+async function fetchHorseResult(date, track, raceNumber) {
+  const key = cacheKey('racingandsports-result', date, track, raceNumber)
+  const cached = getCached(key)
+  if (cached) return cached
+
+  const slug = slugifyTrack(track)
+  const urls = [
+    `https://www.racingandsports.com.au/horse-racing-results/${slug}/${date}/race-${raceNumber}`,
+    `https://www.racingandsports.com.au/results/horse-racing/${slug}/${date}/race-${raceNumber}`,
+    `https://www.racingandsports.com.au/horse-racing/results/${slug}/${date}/race-${raceNumber}`,
+  ]
+
+  let staticFallback = null
+
+  for (const url of urls) {
+    try {
+      const html = await fetchHtmlDocument(url)
+      if (html == null) continue
+
+      const parsed = parseHorseResultHtml(html)
+      if (parsed.finished) {
+        setCache(key, parsed)
+        return parsed
+      }
+
+      staticFallback = parsed
+    } catch {
+      continue
+    }
+  }
+
+  for (const url of urls) {
+    try {
+      const html = await puppeteerGetHtml(url, '.result-runner, .runner-result, .results-table, table.results')
+      const parsed = parseHorseResultHtml(html)
+      setCache(key, parsed)
+      return parsed
+    } catch {
+      continue
+    }
+  }
+
+  if (staticFallback) {
+    setCache(key, staticFallback)
+    return staticFallback
+  }
+
+  return null
+}
+
 // ── Main research entry point ─────────────────────────────────────────────────
 
 function getScraperStatus(errorMessage, recordsReturned) {
@@ -512,4 +713,15 @@ async function closeBrowser() {
   if (_browser) { await _browser.close(); _browser = null }
 }
 
-module.exports = { research, fetchMeetings, closeBrowser, parseTheDogsHtml, parseRacingAndSportsHtml, mergeSources }
+module.exports = {
+  research,
+  fetchMeetings,
+  closeBrowser,
+  parseTheDogsHtml,
+  parseRacingAndSportsHtml,
+  parseGreyhoundResultHtml,
+  parseHorseResultHtml,
+  fetchGreyhoundResult,
+  fetchHorseResult,
+  mergeSources,
+}

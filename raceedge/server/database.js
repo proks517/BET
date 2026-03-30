@@ -2,6 +2,7 @@ const Database = require('better-sqlite3')
 const path = require('path')
 
 const DB_PATH = process.env.DB_PATH || path.join(__dirname, '..', 'raceedge.db')
+const APP_TIMEZONE = process.env.APP_TIMEZONE || 'Australia/Sydney'
 
 const SCHEMA = `
   CREATE TABLE IF NOT EXISTS predictions (
@@ -19,6 +20,8 @@ const SCHEMA = `
     stake       REAL NOT NULL DEFAULT 10,
     pnl         REAL,
     race_distance INTEGER,
+    resolved_automatically INTEGER NOT NULL DEFAULT 0,
+    default_odds_used INTEGER NOT NULL DEFAULT 0,
     created_at  TEXT NOT NULL DEFAULT (datetime('now'))
   );
 
@@ -88,26 +91,68 @@ function parseJournalRow(row) {
   }
 }
 
+function todayDateString() {
+  return new Intl.DateTimeFormat('en-CA', { timeZone: APP_TIMEZONE }).format(new Date())
+}
+
+function normalizeRunnerName(value) {
+  return String(value || '')
+    .trim()
+    .replace(/\s+/g, ' ')
+    .toLowerCase()
+}
+
+function parsePredictionRow(row) {
+  if (!row) return undefined
+
+  return {
+    ...row,
+    race_date: row.date,
+    confidence: row.confidence == null ? null : Number(row.confidence),
+    odds: row.odds == null ? null : Number(row.odds),
+    stake: row.stake == null ? null : Number(row.stake),
+    pnl: row.pnl == null ? null : Number(row.pnl),
+    race_distance: row.race_distance == null ? null : Number(row.race_distance),
+    resolved_automatically: Boolean(Number(row.resolved_automatically)),
+    default_odds_used: Boolean(Number(row.default_odds_used)),
+    result: row.result ?? 'pending',
+  }
+}
+
 function initDb() {
   const db = new Database(DB_PATH)
   db.pragma('journal_mode = WAL')
   db.exec(SCHEMA)
   ensureColumn(db, 'predictions', 'race_distance', 'INTEGER')
+  ensureColumn(db, 'predictions', 'resolved_automatically', 'INTEGER NOT NULL DEFAULT 0')
+  ensureColumn(db, 'predictions', 'default_odds_used', 'INTEGER NOT NULL DEFAULT 0')
   ensureColumn(db, 'prediction_journal', 'race_distance', 'INTEGER')
   ensureColumn(db, 'prediction_journal', 'box_bias_source', 'TEXT')
   return db
 }
 
-function savePrediction(db, { date, track, race_number, race_type, runner, box_barrier, mode, confidence, stake = 10, race_distance = null }) {
+function savePrediction(db, {
+  date,
+  track,
+  race_number,
+  race_type,
+  runner,
+  box_barrier,
+  mode,
+  confidence,
+  stake = 10,
+  race_distance = null,
+  odds = null,
+}) {
   const info = db.prepare(`
-    INSERT INTO predictions (date, track, race_number, race_type, runner, box_barrier, mode, confidence, stake, race_distance)
-    VALUES (@date, @track, @race_number, @race_type, @runner, @box_barrier, @mode, @confidence, @stake, @race_distance)
-  `).run({ date, track, race_number, race_type, runner, box_barrier, mode, confidence, stake, race_distance })
-  return db.prepare('SELECT * FROM predictions WHERE id = ?').get(info.lastInsertRowid)
+    INSERT INTO predictions (date, track, race_number, race_type, runner, box_barrier, mode, confidence, stake, race_distance, odds)
+    VALUES (@date, @track, @race_number, @race_type, @runner, @box_barrier, @mode, @confidence, @stake, @race_distance, @odds)
+  `).run({ date, track, race_number, race_type, runner, box_barrier, mode, confidence, stake, race_distance, odds })
+  return parsePredictionRow(db.prepare('SELECT * FROM predictions WHERE id = ?').get(info.lastInsertRowid))
 }
 
 function getPredictions(db, limit = 100) {
-  return db.prepare('SELECT * FROM predictions ORDER BY id DESC LIMIT ?').all(limit)
+  return db.prepare('SELECT * FROM predictions ORDER BY id DESC LIMIT ?').all(limit).map(parsePredictionRow)
 }
 
 function updateResult(db, id, result, odds) {
@@ -123,13 +168,72 @@ function updateResult(db, id, result, odds) {
     pnl = 0
   }
   db.prepare(`
-    UPDATE predictions SET result = @result, odds = @odds, pnl = @pnl WHERE id = @id
+    UPDATE predictions
+    SET
+      result = @result,
+      odds = @odds,
+      pnl = @pnl,
+      resolved_automatically = 0,
+      default_odds_used = 0
+    WHERE id = @id
   `).run({ result, odds: odds ?? null, pnl, id })
-  return db.prepare('SELECT * FROM predictions WHERE id = ?').get(id)
+  return parsePredictionRow(db.prepare('SELECT * FROM predictions WHERE id = ?').get(id))
+}
+
+function getPendingPredictions(db) {
+  const today = todayDateString()
+
+  return db.prepare(`
+    SELECT *
+    FROM predictions
+    WHERE date < ?
+      AND (result IS NULL OR result = 'pending')
+    ORDER BY date DESC, race_number DESC, id DESC
+  `).all(today).map(parsePredictionRow)
+}
+
+function autoResolveResult(db, predictionId, winner, odds) {
+  const prediction = db.prepare('SELECT * FROM predictions WHERE id = ?').get(predictionId)
+  if (!prediction) return undefined
+
+  const normalizedPrediction = normalizeRunnerName(prediction.runner)
+  const normalizedWinner = normalizeRunnerName(winner)
+  const didWin = normalizedWinner.length > 0 && normalizedPrediction === normalizedWinner
+  const stake = Number(prediction.stake ?? 10)
+  const resolvedOdds = prediction.odds ?? odds ?? 2.0
+  const defaultOddsUsed = didWin && prediction.odds == null && odds == null
+  const result = didWin ? 'win' : 'loss'
+  const pnl = didWin
+    ? Math.round(((resolvedOdds * stake) - stake) * 100) / 100
+    : -stake
+
+  db.prepare(`
+    UPDATE predictions
+    SET
+      result = @result,
+      odds = @stored_odds,
+      pnl = @pnl,
+      resolved_automatically = 1,
+      default_odds_used = @default_odds_used
+    WHERE id = @id
+  `).run({
+    id: predictionId,
+    result,
+    stored_odds: didWin ? resolvedOdds : (prediction.odds ?? odds ?? null),
+    pnl,
+    default_odds_used: defaultOddsUsed ? 1 : 0,
+  })
+
+  return parsePredictionRow(db.prepare('SELECT * FROM predictions WHERE id = ?').get(predictionId))
 }
 
 function getStats(db) {
-  const settled = db.prepare(`SELECT * FROM predictions WHERE result != 'pending'`).all()
+  const settled = db.prepare(`
+    SELECT *
+    FROM predictions
+    WHERE result IS NOT NULL
+      AND result != 'pending'
+  `).all()
   const wins = settled.filter(p => p.result === 'win')
   const overall_win_rate = settled.length > 0
     ? Math.round((wins.length / settled.length) * 100)
@@ -148,9 +252,10 @@ function getStats(db) {
   })
 
   const total_pnl = Math.round(settled.reduce((s, p) => s + (p.pnl ?? 0), 0) * 100) / 100
-  const last10 = db.prepare('SELECT * FROM predictions ORDER BY id DESC LIMIT 10').all()
+  const last10 = db.prepare('SELECT * FROM predictions ORDER BY id DESC LIMIT 10').all().map(parsePredictionRow)
+  const pending_count = getPendingPredictions(db).length
 
-  return { overall_win_rate, by_mode, by_type, total_pnl, last10 }
+  return { overall_win_rate, by_mode, by_type, total_pnl, last10, pending_count }
 }
 
 function logScraperHealth(db, entry) {
@@ -342,6 +447,8 @@ module.exports = {
   savePrediction,
   getPredictions,
   updateResult,
+  getPendingPredictions,
+  autoResolveResult,
   getStats,
   logScraperHealth,
   getScraperStats,

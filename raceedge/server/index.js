@@ -6,6 +6,8 @@ const {
   savePrediction,
   getPredictions,
   updateResult,
+  getPendingPredictions,
+  autoResolveResult,
   getStats,
   getScraperStats,
   getBoxBiasStats,
@@ -13,11 +15,18 @@ const {
   getJournalEntry,
   getJournalHistory,
 } = require('./database.js')
-const { research, fetchMeetings, closeBrowser } = require('./scraper.js')
+const {
+  research,
+  fetchMeetings,
+  fetchGreyhoundResult,
+  fetchHorseResult,
+  closeBrowser,
+} = require('./scraper.js')
 const { applyMode, getDefaultBoxBiasTable } = require('./predictor.js')
 
 const app  = express()
 const PORT = process.env.PORT || 3001
+const RESULT_CHECK_INTERVAL_MS = 30 * 60 * 1000
 
 const CORS_ORIGIN = process.env.CORS_ORIGIN || 'http://localhost:5173'
 app.use(cors({ origin: CORS_ORIGIN === '*' ? true : CORS_ORIGIN }))
@@ -29,6 +38,105 @@ if (process.env.NODE_ENV === 'production') {
 
 const db = initDb()
 console.log('[RaceEdge] Database ready')
+let activeResultCheck = null
+
+function sleep(ms) {
+  return new Promise(resolve => setTimeout(resolve, ms))
+}
+
+function getResultSourceConfig(prediction) {
+  if (prediction.race_type === 'greyhound') {
+    return { source: 'thedogs', fetcher: fetchGreyhoundResult }
+  }
+  return { source: 'racingandsports', fetcher: fetchHorseResult }
+}
+
+async function runPendingResultCheck() {
+  if (activeResultCheck) return activeResultCheck
+
+  activeResultCheck = (async () => {
+    const pendingPredictions = getPendingPredictions(db)
+    const summary = {
+      checked: pendingPredictions.length,
+      resolved: 0,
+      stillPending: pendingPredictions.length,
+      errors: [],
+    }
+
+    if (pendingPredictions.length === 0) {
+      summary.stillPending = 0
+      return summary
+    }
+
+    const lastRequestAtBySource = new Map()
+
+    for (const prediction of pendingPredictions) {
+      const { source, fetcher } = getResultSourceConfig(prediction)
+      const lastRequestAt = lastRequestAtBySource.get(source)
+      if (lastRequestAt) {
+        const elapsed = Date.now() - lastRequestAt
+        if (elapsed < 1000) {
+          await sleep(1000 - elapsed)
+        }
+      }
+
+      lastRequestAtBySource.set(source, Date.now())
+
+      let resultData = null
+      try {
+        resultData = await fetcher(prediction.date, prediction.track, prediction.race_number)
+      } catch (err) {
+        summary.errors.push({
+          predictionId: prediction.id,
+          track: prediction.track,
+          raceNumber: prediction.race_number,
+          source,
+          error: err.message,
+        })
+        continue
+      }
+
+      if (resultData == null) {
+        summary.errors.push({
+          predictionId: prediction.id,
+          track: prediction.track,
+          raceNumber: prediction.race_number,
+          source,
+          error: 'Result page unavailable',
+        })
+        continue
+      }
+
+      if (!resultData.finished || !resultData.winner) {
+        continue
+      }
+
+      const resolved = autoResolveResult(db, prediction.id, resultData.winner, undefined)
+      if (resolved) {
+        summary.resolved += 1
+      } else {
+        summary.errors.push({
+          predictionId: prediction.id,
+          track: prediction.track,
+          raceNumber: prediction.race_number,
+          source,
+          error: 'Prediction could not be resolved',
+        })
+      }
+    }
+
+    summary.stillPending = getPendingPredictions(db).length
+    return summary
+  })().finally(() => {
+    activeResultCheck = null
+  })
+
+  return activeResultCheck
+}
+
+function formatResultCheckSummary(summary) {
+  return `checked=${summary.checked}, resolved=${summary.resolved}, stillPending=${summary.stillPending}, errors=${summary.errors.length}`
+}
 
 app.get('/api/health', (req, res) => {
   try {
@@ -98,6 +206,7 @@ app.post('/api/research', async (req, res) => {
       box_barrier: prediction.runner.box ?? prediction.runner.barrier ?? null,
       mode,
       confidence:  prediction.confidence,
+      odds:        prediction.runner.odds ?? null,
       stake:       stake || 10,
     })
 
@@ -170,6 +279,15 @@ app.get('/api/predictions', (req, res) => {
   }
 })
 
+// GET /api/pending
+app.get('/api/pending', (req, res) => {
+  try {
+    res.json({ predictions: getPendingPredictions(db) })
+  } catch (err) {
+    res.status(500).json({ error: err.message })
+  }
+})
+
 // PATCH /api/predictions/:id
 app.patch('/api/predictions/:id', (req, res) => {
   const id = parseInt(req.params.id, 10)
@@ -194,6 +312,17 @@ app.get('/api/stats', (req, res) => {
   try {
     res.json(getStats(db))
   } catch (err) {
+    res.status(500).json({ error: err.message })
+  }
+})
+
+// POST /api/check-results
+app.post('/api/check-results', async (req, res) => {
+  try {
+    const summary = await runPendingResultCheck()
+    res.json(summary)
+  } catch (err) {
+    console.error('[/api/check-results]', err)
     res.status(500).json({ error: err.message })
   }
 })
@@ -274,7 +403,23 @@ app.get('/api/journal/:predictionId', (req, res) => {
   }
 })
 
+const resultCheckInterval = setInterval(async () => {
+  try {
+    if (getPendingPredictions(db).length === 0) return
+    const summary = await runPendingResultCheck()
+    console.log(`[RaceEdge Results] ${formatResultCheckSummary(summary)}`)
+    if (summary.errors.length > 0) {
+      console.log('[RaceEdge Results] Errors:', summary.errors)
+    }
+  } catch (err) {
+    console.error('[RaceEdge Results] Scheduled check failed:', err.message)
+  }
+}, RESULT_CHECK_INTERVAL_MS)
+
+resultCheckInterval.unref?.()
+
 async function shutdown() {
+  clearInterval(resultCheckInterval)
   await closeBrowser()
   db.close()
   process.exit(0)
