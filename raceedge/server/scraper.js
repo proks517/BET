@@ -82,6 +82,65 @@ function parseRacingAndSportsHtml(html) {
   return runners
 }
 
+function parseOddsValue(value) {
+  const text = cleanText(value)
+  if (!text) return null
+  const match = text.match(/(\d+(?:\.\d+)?)/)
+  if (!match) return null
+  const parsed = parseFloat(match[1])
+  return Number.isFinite(parsed) ? parsed : null
+}
+
+function normalizeRunnerLookup(value) {
+  return cleanText(value).toLowerCase()
+}
+
+function normalizeOddsRows(rows) {
+  const seen = new Set()
+
+  return rows.filter(row => row.runnerName && row.winOdds != null).filter(row => {
+    const boxKey = row.box != null ? `box:${row.box}` : ''
+    const nameKey = normalizeRunnerLookup(row.runnerName)
+    const key = boxKey || `name:${nameKey}`
+    if (!key || seen.has(key)) return false
+    seen.add(key)
+    return true
+  })
+}
+
+function parseRacingAndSportsOddsHtml(html) {
+  const $ = cheerio.load(html)
+  const rows = []
+
+  $('.form-runner, .runner-form-row, .runner-row, .race-runner, .market-row').each((_, row) => {
+    const runnerName = cleanText(
+      $(row).find('.runner-name, .horse-name, .dog-name, .name').first().text()
+    )
+    if (!runnerName) return
+
+    const box = extractInteger(
+      $(row).find('.box, .barrier, .runner-number, .cloth-number').first().text()
+    )
+    const winOdds = parseOddsValue(
+      $(row).find('.win-price, .win-odds, .odds, .price, .market-price').first().text()
+    )
+    const placeOdds = parseOddsValue(
+      $(row).find('.place-price, .place-odds, .odds-place').first().text()
+    )
+
+    if (winOdds == null) return
+
+    rows.push({
+      box: box ?? undefined,
+      runnerName,
+      winOdds,
+      placeOdds: placeOdds ?? null,
+    })
+  })
+
+  return normalizeOddsRows(rows)
+}
+
 function cleanText(value) {
   return String(value || '')
     .replace(/\s+/g, ' ')
@@ -308,6 +367,45 @@ function mergeSources(sourceLists) {
     }
   }
   return Array.from(map.values())
+}
+
+function mergeOddsIntoRunners(runners, oddsPayload) {
+  if (!Array.isArray(runners) || runners.length === 0 || !oddsPayload?.odds?.length) {
+    return runners
+  }
+
+  const byBox = new Map()
+  const byName = new Map()
+
+  for (const row of oddsPayload.odds) {
+    const numericBox = extractInteger(row.box)
+    if (numericBox != null && !byBox.has(numericBox)) {
+      byBox.set(numericBox, row)
+    }
+
+    const normalizedName = normalizeRunnerLookup(row.runnerName)
+    if (normalizedName && !byName.has(normalizedName)) {
+      byName.set(normalizedName, row)
+    }
+  }
+
+  return runners.map(runner => {
+    const numericBox = extractInteger(runner.box ?? runner.barrier)
+    const matchedOdds = (
+      (numericBox != null ? byBox.get(numericBox) : null) ||
+      byName.get(normalizeRunnerLookup(runner.name))
+    )
+
+    if (!matchedOdds) return runner
+
+    return {
+      ...runner,
+      odds: matchedOdds.winOdds,
+      decimalOdds: matchedOdds.winOdds,
+      placeOdds: matchedOdds.placeOdds ?? runner.placeOdds ?? undefined,
+      oddsSource: oddsPayload.source,
+    }
+  })
 }
 
 // ── Static fetchers ───────────────────────────────────────────────────────────
@@ -800,6 +898,113 @@ async function fetchPunters(date, track, raceNumber) {
   }
 }
 
+function mapRunnerResultToOddsRows(result) {
+  return normalizeOddsRows((result?.runners || []).map(runner => ({
+    box: runner.box ?? runner.barrier ?? undefined,
+    runnerName: runner.name,
+    winOdds: parseOddsValue(runner.odds),
+    placeOdds: parseOddsValue(runner.placeOdds),
+  })))
+}
+
+async function fetchTabOdds(date, track, raceNumber, raceType) {
+  const result = await fetchTAB(date, track, raceNumber, raceType)
+  return mapRunnerResultToOddsRows(result)
+}
+
+async function fetchLadbrokesOdds(date, track, raceNumber, raceType) {
+  const seg = raceType === 'greyhound' ? 'greyhounds' : 'horse-racing'
+  const slug = track.toLowerCase().replace(/\s+/g, '-')
+  const url = `https://www.racingandsports.com.au/${seg}/form/${slug}/${date}/race-${raceNumber}`
+  const res = await fetchWithRetry(url, FETCH_OPTS)
+  const html = await res.text()
+  return parseRacingAndSportsOddsHtml(html)
+}
+
+async function fetchNedsOdds(date, track, raceNumber, raceType) {
+  const slug = track.toLowerCase().replace(/\s+/g, '-')
+  const seg = raceType === 'greyhound' ? 'greyhound-racing' : 'horse-racing'
+  const url = `https://www.neds.com.au/${seg}/${slug}/${date}/race-${raceNumber}`
+  const html = await puppeteerGetHtml(url, '[class*=\"runner\"],[class*=\"price\"],.runner-row')
+  const $ = cheerio.load(html)
+  const rows = []
+
+  $('[class*="runner-row"], [class*="RunnerRow"], .runner-row, .market-row').each((_, row) => {
+    const runnerName = cleanText(
+      $(row).find('[class*="runner-name"], [class*="RunnerName"], .runner-name, .name').first().text()
+    )
+    if (!runnerName) return
+
+    const box = extractInteger(
+      $(row).find('[class*="box"], [class*="Barrier"], [class*="barrier"], .box, .barrier').first().text()
+    )
+    const winOdds = parseOddsValue(
+      $(row).find('[class*="odds"], [class*="price"], [class*="Price"], .odds, .price').first().text()
+    )
+
+    if (winOdds == null) return
+
+    rows.push({
+      box: box ?? undefined,
+      runnerName,
+      winOdds,
+      placeOdds: null,
+    })
+  })
+
+  return normalizeOddsRows(rows)
+}
+
+async function fetchOddsForRace(date, track, raceNumber, raceType, db) {
+  const key = cacheKey('odds', date, track, raceNumber)
+  const cached = getCached(key)
+  if (cached) return cached
+
+  const sources = [
+    { name: 'tab', fetch: () => fetchTabOdds(date, track, raceNumber, raceType) },
+    { name: 'ladbrokes', fetch: () => fetchLadbrokesOdds(date, track, raceNumber, raceType) },
+    { name: 'neds', fetch: () => fetchNedsOdds(date, track, raceNumber, raceType) },
+  ]
+
+  for (const source of sources) {
+    const startedAt = Date.now()
+
+    try {
+      const odds = await source.fetch()
+
+      saveScraperHealth(db, {
+        source_name: `odds_${source.name}`,
+        race_date: date,
+        track,
+        race_number: raceNumber,
+        status: odds.length > 0 ? 'success' : 'empty',
+        response_time_ms: Math.max(0, Date.now() - startedAt),
+        records_returned: odds.length,
+        error_message: null,
+      })
+
+      if (odds.length > 0) {
+        const payload = { source: source.name, odds }
+        setCache(key, payload)
+        return payload
+      }
+    } catch (err) {
+      saveScraperHealth(db, {
+        source_name: `odds_${source.name}`,
+        race_date: date,
+        track,
+        race_number: raceNumber,
+        status: /timeout|timed out|abort/i.test(err.message) ? 'timeout' : 'error',
+        response_time_ms: Math.max(0, Date.now() - startedAt),
+        records_returned: 0,
+        error_message: err.message,
+      })
+    }
+  }
+
+  return null
+}
+
 async function fetchHorseResult(date, track, raceNumber) {
   const key = cacheKey('racingandsports-result', date, track, raceNumber)
   const cached = getCached(key)
@@ -931,10 +1136,14 @@ async function research(date, track, raceNumber, raceType, db) {
   )
 
   const successful = scraperResults.filter(r => r.runners.length > 0)
-  const runners = mergeSources(successful.map(r => r.runners))
+  const mergedRunners = mergeSources(successful.map(r => r.runners))
+  const oddsPayload = await fetchOddsForRace(date, track, raceNumber, raceType, db)
+  const runners = mergeOddsIntoRunners(mergedRunners, oddsPayload)
 
   return {
     runners,
+    odds: oddsPayload?.odds || null,
+    oddsSource: oddsPayload?.source || null,
     sources: scraperResults,
     sourcesUsed:    successful.map(r => r.source),
     sourcesSkipped: scraperResults.filter(r => r.error || r.runners.length === 0).map(r => ({ source: r.source, reason: r.error || 'no data' })),
@@ -959,5 +1168,6 @@ module.exports = {
   parseHorseResultHtml,
   fetchGreyhoundResult,
   fetchHorseResult,
+  fetchOddsForRace,
   mergeSources,
 }

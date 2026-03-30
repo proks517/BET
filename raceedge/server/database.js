@@ -18,6 +18,10 @@ const SCHEMA = `
     confidence  REAL NOT NULL,
     result      TEXT NOT NULL DEFAULT 'pending',
     odds        REAL,
+    odds_source TEXT,
+    win_probability REAL,
+    ev          REAL,
+    expected_return REAL,
     stake       REAL NOT NULL DEFAULT 10,
     pnl         REAL,
     race_distance INTEGER,
@@ -124,6 +128,10 @@ function parsePredictionRow(row) {
     race_date: row.date,
     confidence: row.confidence == null ? null : Number(row.confidence),
     odds: row.odds == null ? null : Number(row.odds),
+    odds_source: row.odds_source ?? null,
+    win_probability: row.win_probability == null ? null : Number(row.win_probability),
+    ev: row.ev == null ? null : Number(row.ev),
+    expected_return: row.expected_return == null ? null : Number(row.expected_return),
     stake: row.stake == null ? null : Number(row.stake),
     pnl: row.pnl == null ? null : Number(row.pnl),
     race_distance: row.race_distance == null ? null : Number(row.race_distance),
@@ -142,6 +150,10 @@ function initDb() {
   db.exec(SCHEMA)
   ensureColumn(db, 'predictions', 'race_distance', 'INTEGER')
   ensureColumn(db, 'predictions', 'race_grade', 'TEXT')
+  ensureColumn(db, 'predictions', 'odds_source', 'TEXT')
+  ensureColumn(db, 'predictions', 'win_probability', 'REAL')
+  ensureColumn(db, 'predictions', 'ev', 'REAL')
+  ensureColumn(db, 'predictions', 'expected_return', 'REAL')
   ensureColumn(db, 'predictions', 'ai_recommendation', 'TEXT')
   ensureColumn(db, 'predictions', 'ai_agreed', 'INTEGER')
   ensureColumn(db, 'predictions', 'resolved_automatically', 'INTEGER NOT NULL DEFAULT 0')
@@ -165,12 +177,24 @@ function savePrediction(db, {
   stake = 10,
   race_distance = null,
   odds = null,
+  odds_source = null,
+  win_probability = null,
+  ev = null,
+  expected_return = null,
   ai_recommendation = null,
   ai_agreed = null,
 }) {
   const info = db.prepare(`
-    INSERT INTO predictions (date, track, race_number, race_type, race_grade, runner, box_barrier, mode, confidence, stake, race_distance, odds, ai_recommendation, ai_agreed)
-    VALUES (@date, @track, @race_number, @race_type, @race_grade, @runner, @box_barrier, @mode, @confidence, @stake, @race_distance, @odds, @ai_recommendation, @ai_agreed)
+    INSERT INTO predictions (
+      date, track, race_number, race_type, race_grade, runner, box_barrier,
+      mode, confidence, stake, race_distance, odds, odds_source,
+      win_probability, ev, expected_return, ai_recommendation, ai_agreed
+    )
+    VALUES (
+      @date, @track, @race_number, @race_type, @race_grade, @runner, @box_barrier,
+      @mode, @confidence, @stake, @race_distance, @odds, @odds_source,
+      @win_probability, @ev, @expected_return, @ai_recommendation, @ai_agreed
+    )
   `).run({
     date,
     track,
@@ -184,10 +208,18 @@ function savePrediction(db, {
     stake,
     race_distance,
     odds,
+    odds_source,
+    win_probability,
+    ev,
+    expected_return,
     ai_recommendation,
     ai_agreed: ai_agreed == null ? null : (ai_agreed ? 1 : 0),
   })
   return parsePredictionRow(db.prepare('SELECT * FROM predictions WHERE id = ?').get(info.lastInsertRowid))
+}
+
+function getPrediction(db, id) {
+  return parsePredictionRow(db.prepare('SELECT * FROM predictions WHERE id = ?').get(id))
 }
 
 function roundTo(value, digits = 1) {
@@ -244,6 +276,86 @@ function buildPerformanceSummary(rows, labelKey, labelValue) {
 
 function getPredictions(db, limit = 100) {
   return db.prepare('SELECT * FROM predictions ORDER BY id DESC LIMIT ?').all(limit).map(parsePredictionRow)
+}
+
+function updatePredictionSelection(db, id, {
+  runner,
+  box_barrier = null,
+  confidence = null,
+  odds = null,
+  odds_source = null,
+  win_probability = null,
+  ev = null,
+  expected_return = null,
+}) {
+  db.prepare(`
+    UPDATE predictions
+    SET
+      runner = @runner,
+      box_barrier = @box_barrier,
+      confidence = @confidence,
+      odds = @odds,
+      odds_source = @odds_source,
+      win_probability = @win_probability,
+      ev = @ev,
+      expected_return = @expected_return
+    WHERE id = @id
+  `).run({
+    id,
+    runner,
+    box_barrier,
+    confidence,
+    odds,
+    odds_source,
+    win_probability,
+    ev,
+    expected_return,
+  })
+
+  return getPrediction(db, id)
+}
+
+function updateJournalSelection(db, predictionId, {
+  all_runners_json,
+  winner_name,
+  winner_box = null,
+  winner_composite_score,
+  winner_breakdown_json,
+  mode_used = null,
+  raw_data_summary = null,
+}) {
+  const latest = db.prepare(`
+    SELECT id, raw_data_summary
+    FROM prediction_journal
+    WHERE prediction_id = ?
+    ORDER BY id DESC
+    LIMIT 1
+  `).get(predictionId)
+  if (!latest) return undefined
+
+  db.prepare(`
+    UPDATE prediction_journal
+    SET
+      all_runners_json = @all_runners_json,
+      winner_name = @winner_name,
+      winner_box = @winner_box,
+      winner_composite_score = @winner_composite_score,
+      winner_breakdown_json = @winner_breakdown_json,
+      mode_used = COALESCE(@mode_used, mode_used),
+      raw_data_summary = COALESCE(@raw_data_summary, raw_data_summary)
+    WHERE id = @id
+  `).run({
+    id: latest.id,
+    all_runners_json: JSON.stringify(all_runners_json ?? []),
+    winner_name,
+    winner_box,
+    winner_composite_score,
+    winner_breakdown_json: JSON.stringify(winner_breakdown_json ?? {}),
+    mode_used,
+    raw_data_summary,
+  })
+
+  return getJournalEntry(db, predictionId)
 }
 
 function updateResult(db, id, result, odds) {
@@ -321,6 +433,13 @@ function autoResolveResult(db, predictionId, winner, odds) {
 function getStats(db) {
   const settled = getResolvedPredictions(db)
   const wins = settled.filter(p => p.result === 'win')
+  const allWithEv = db.prepare(`
+    SELECT *
+    FROM predictions
+    WHERE ev IS NOT NULL
+  `).all().map(parsePredictionRow)
+  const settledWithOdds = settled.filter(prediction => prediction.odds != null)
+  const totalStaked = settled.reduce((sum, prediction) => sum + (prediction.stake ?? 0), 0)
   const overall_win_rate = settled.length > 0
     ? Math.round((wins.length / settled.length) * 100)
     : 0
@@ -350,10 +469,32 @@ function getStats(db) {
   })
 
   const total_pnl = roundCurrency(settled.reduce((s, p) => s + (p.pnl ?? 0), 0))
+  const averageOdds = settledWithOdds.length > 0
+    ? roundTo(settledWithOdds.reduce((sum, prediction) => sum + prediction.odds, 0) / settledWithOdds.length, 2)
+    : null
+  const averageEV = allWithEv.length > 0
+    ? roundTo(allWithEv.reduce((sum, prediction) => sum + prediction.ev, 0) / allWithEv.length, 4)
+    : null
+  const theoreticalROI = averageEV
+  const actualROI = totalStaked > 0
+    ? roundTo(total_pnl / totalStaked, 4)
+    : null
   const last10 = db.prepare('SELECT * FROM predictions ORDER BY id DESC LIMIT 10').all().map(parsePredictionRow)
   const pending_count = getPendingPredictions(db).length
 
-  return { overall_win_rate, by_mode, by_type, total_pnl, last10, pending_count, ai_agreement: getAIAgreementStats(db) }
+  return {
+    overall_win_rate,
+    by_mode,
+    by_type,
+    total_pnl,
+    averageOdds,
+    averageEV,
+    theoreticalROI,
+    actualROI,
+    last10,
+    pending_count,
+    ai_agreement: getAIAgreementStats(db),
+  }
 }
 
 function getStatsByTrack(db) {
@@ -825,8 +966,11 @@ function getJournalHistory(db, limit = 20) {
 
 module.exports = {
   initDb,
+  getPrediction,
   savePrediction,
   getPredictions,
+  updatePredictionSelection,
+  updateJournalSelection,
   updateResult,
   getPendingPredictions,
   autoResolveResult,

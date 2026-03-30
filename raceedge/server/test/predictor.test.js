@@ -9,6 +9,10 @@ const {
   scoreClassConsistency,
   scoreTrainerStrikeRate,
   scoreDaysSinceLastRun,
+  calculateWinProbabilities,
+  calculateEV,
+  calculateExpectedReturn,
+  classifyOdds,
   applyMode,
   generateBestBets,
 } = require('../predictor.js')
@@ -219,115 +223,161 @@ describe('scoreRunner and breakdown', () => {
   })
 })
 
+describe('odds helpers', () => {
+  test('calculateWinProbabilities returns probabilities that sum to 1.0', () => {
+    const runners = calculateWinProbabilities([
+      { name: 'Alpha', compositeScore: 70 },
+      { name: 'Beta', compositeScore: 20 },
+      { name: 'Gamma', compositeScore: 10 },
+    ])
+
+    const totalProbability = runners.reduce((sum, runner) => sum + runner.winProbability, 0)
+
+    assert.equal(Number(totalProbability.toFixed(6)), 1)
+    assert.equal(runners[0].winProbability, 0.7)
+    assert.equal(runners[1].winProbability, 0.2)
+    assert.equal(runners[2].winProbability, 0.1)
+  })
+
+  test('calculateWinProbabilities handles a single runner', () => {
+    const [runner] = calculateWinProbabilities([{ name: 'Solo', compositeScore: 88 }])
+    assert.equal(runner.winProbability, 1)
+  })
+
+  test('calculateEV returns the expected edge for known inputs', () => {
+    assert.equal(calculateEV(0.4, 3.5), 0.4)
+  })
+
+  test('calculateEV returns null when odds are unavailable', () => {
+    assert.equal(calculateEV(0.4, null), null)
+  })
+
+  test('calculateExpectedReturn returns the expected per-dollar return', () => {
+    assert.equal(calculateExpectedReturn(1, 0.4, 3.5), 0.8)
+  })
+
+  test('classifyOdds maps each price range correctly', () => {
+    assert.equal(classifyOdds(1.7), 'hotpot')
+    assert.equal(classifyOdds(2.4), 'favourite')
+    assert.equal(classifyOdds(4.8), 'midfield')
+    assert.equal(classifyOdds(9.5), 'roughie')
+    assert.equal(classifyOdds(15), 'longshot')
+  })
+})
+
+function buildPreScoredRunner({
+  name,
+  box,
+  compositeScore,
+  recentForm = 60,
+  bestTime = 60,
+  boxDraw = 60,
+  classConsistency = 60,
+  trainerStrikeRate = 50,
+  daysSinceLastRun = 70,
+  decimalOdds = null,
+  oddsSource = null,
+}) {
+  return {
+    name,
+    box,
+    compositeScore,
+    breakdown: {
+      recentForm,
+      bestTime,
+      boxDraw,
+      classConsistency,
+      trainerStrikeRate,
+      daysSinceLastRun,
+    },
+    ...(decimalOdds == null ? {} : { decimalOdds, odds: decimalOdds }),
+    ...(oddsSource ? { oddsSource } : {}),
+  }
+}
+
 describe('applyMode', () => {
-  const field = [
-    {
-      name: 'Anchor',
-      box: 1,
-      distanceMeters: 515,
-      lastStarts: '1-1-2-1-2-1',
-      bestTime: 29.45,
-      trainerStrike: 28,
-      careerTop3Pct: 72,
-      daysSinceLastRun: 10,
-      odds: 2.6,
-    },
-    {
-      name: 'Overlay',
-      box: 2,
-      distanceMeters: 515,
-      lastStarts: '1-2-1-2-3-1',
-      bestTime: 29.5,
-      trainerStrike: 20,
-      careerTop3Pct: 64,
-      daysSinceLastRun: 14,
-      odds: 4.8,
-    },
-    {
-      name: 'Solid',
-      box: 4,
-      distanceMeters: 515,
-      lastStarts: '2-2-3-2-3-2',
-      bestTime: 29.7,
-      trainerStrike: 16,
-      careerTop3Pct: 55,
-      daysSinceLastRun: 18,
-      odds: 6.5,
-    },
-    {
-      name: 'Rocket',
-      box: 7,
-      distanceMeters: 515,
-      lastStarts: '4-4-5-4-5-4',
-      bestTime: 29.3,
-      trainerStrike: 10,
-      careerTop3Pct: 25,
-      daysSinceLastRun: 30,
-      odds: 14.0,
-    },
-    {
-      name: 'Battler',
-      box: 8,
-      distanceMeters: 515,
-      lastStarts: '6-6-5-6-6-5',
-      bestTime: 30.1,
-      trainerStrike: 3,
-      careerTop3Pct: 8,
-      daysSinceLastRun: 65,
-      odds: 22.0,
-    },
-  ]
+  test('safest returns the top 3 qualifiers by win probability when odds are available', () => {
+    const result = applyMode([
+      buildPreScoredRunner({ name: 'Anchor', box: 1, compositeScore: 70, decimalOdds: 3.0, oddsSource: 'tab', bestTime: 78 }),
+      buildPreScoredRunner({ name: 'Steady', box: 2, compositeScore: 60, decimalOdds: 3.4, oddsSource: 'tab', bestTime: 74 }),
+      buildPreScoredRunner({ name: 'Measured', box: 3, compositeScore: 55, decimalOdds: 3.8, oddsSource: 'tab', bestTime: 72 }),
+      buildPreScoredRunner({ name: 'Spec', box: 4, compositeScore: 15, decimalOdds: 10.0, oddsSource: 'tab', bestTime: 82 }),
+    ], 'safest')
 
-  test('safest returns the top composite scorer', () => {
-    const result = applyMode(field, 'safest')
-    assert.equal(result.runner.name, 'Anchor')
-    assert.equal(result.score, result.compositeScore)
-    assert.ok(result.breakdown)
+    assert.deepEqual(result.picks.map(runner => runner.name), ['Anchor', 'Steady', 'Measured'])
+    assert.equal(result.oddsAvailable, true)
+    assert.ok(result.picks.every((runner, index, collection) => index === 0 || collection[index - 1].winProbability >= runner.winProbability))
   })
 
-  test('value selects a runner within 15 points of the top scorer without picking the top scorer', () => {
-    const result = applyMode(field, 'value')
-    assert.equal(result.runner.name, 'Overlay')
-    assert.notEqual(result.runner.name, 'Anchor')
+  test('value returns only runners with EV above 0.15', () => {
+    const result = applyMode([
+      buildPreScoredRunner({ name: 'Market Lead', box: 1, compositeScore: 80, decimalOdds: 2.2, oddsSource: 'tab', bestTime: 76 }),
+      buildPreScoredRunner({ name: 'Overlay', box: 2, compositeScore: 70, decimalOdds: 5.0, oddsSource: 'tab', bestTime: 74 }),
+      buildPreScoredRunner({ name: 'Borderline', box: 3, compositeScore: 60, decimalOdds: 4.5, oddsSource: 'tab', bestTime: 72 }),
+      buildPreScoredRunner({ name: 'Too Risky', box: 4, compositeScore: 25, decimalOdds: 9.0, oddsSource: 'tab', bestTime: 82 }),
+    ], 'value')
+
+    assert.deepEqual(result.picks.map(runner => runner.name), ['Overlay'])
+    assert.ok(result.picks.every(runner => runner.ev > 0.15))
   })
 
-  test('longshot selects a runner ranked fourth or lower with genuine speed', () => {
-    const result = applyMode(field, 'longshot')
-    assert.equal(result.runner.name, 'Rocket')
-    assert.ok(result.breakdown.bestTime > 70)
+  test('longshot requires odds of at least $8.00', () => {
+    const result = applyMode([
+      buildPreScoredRunner({ name: 'Leader', box: 1, compositeScore: 80, decimalOdds: 2.0, oddsSource: 'tab', bestTime: 65 }),
+      buildPreScoredRunner({ name: 'Wide Drifter', box: 2, compositeScore: 65, decimalOdds: 9.0, oddsSource: 'tab', bestTime: 60 }),
+      buildPreScoredRunner({ name: 'Fast Roughie', box: 3, compositeScore: 50, decimalOdds: 7.5, oddsSource: 'tab', bestTime: 91 }),
+      buildPreScoredRunner({ name: 'Live Longshot', box: 4, compositeScore: 45, decimalOdds: 10.0, oddsSource: 'tab', bestTime: 82 }),
+      buildPreScoredRunner({ name: 'Wild Card', box: 5, compositeScore: 40, decimalOdds: 14.0, oddsSource: 'tab', recentForm: 78, bestTime: 68 }),
+    ], 'longshot')
+
+    assert.deepEqual(result.picks.map(runner => runner.name), ['Wild Card', 'Live Longshot'])
+    assert.ok(result.picks.every(runner => runner.decimalOdds >= 8))
+  })
+
+  test('falls back gracefully when odds are not provided', () => {
+    const result = applyMode([
+      buildPreScoredRunner({ name: 'Leader', box: 1, compositeScore: 80 }),
+      buildPreScoredRunner({ name: 'Overlay', box: 2, compositeScore: 72, bestTime: 78 }),
+      buildPreScoredRunner({ name: 'Closer', box: 3, compositeScore: 65, bestTime: 74 }),
+    ], 'value')
+
+    assert.equal(result.oddsAvailable, false)
+    assert.deepEqual(result.picks.map(runner => runner.name), ['Overlay', 'Closer'])
+  })
+
+  test('returns one result when fewer than three runners qualify', () => {
+    const result = applyMode([
+      buildPreScoredRunner({ name: 'Leader', box: 1, compositeScore: 82, bestTime: 65 }),
+      buildPreScoredRunner({ name: 'Second Pick', box: 2, compositeScore: 70, bestTime: 62 }),
+      buildPreScoredRunner({ name: 'Third Pick', box: 3, compositeScore: 55, bestTime: 60 }),
+      buildPreScoredRunner({ name: 'Solo Roughie', box: 4, compositeScore: 40, bestTime: 78 }),
+      buildPreScoredRunner({ name: 'Non Qualifier', box: 5, compositeScore: 30, bestTime: 68 }),
+    ], 'longshot')
+
+    assert.equal(result.picks.length, 1)
+    assert.equal(result.picks[0].name, 'Solo Roughie')
   })
 
   test('confidence is capped at 92 percent', () => {
     const result = applyMode([
-      {
-        name: 'Machine',
-        box: 1,
-        distanceMeters: 320,
-        lastStarts: '1-1-1-1-1-1',
-        bestTime: 28.8,
-        trainerStrike: 40,
-        careerTop3Pct: 100,
-        daysSinceLastRun: 10,
-      },
-      {
-        name: 'Plodder',
-        box: 8,
-        distanceMeters: 320,
-        lastStarts: '6-6-5-6-6-5',
-        bestTime: 30.2,
-        trainerStrike: 1,
-        careerTop3Pct: 5,
-        daysSinceLastRun: 75,
-      },
+      buildPreScoredRunner({ name: 'Machine', box: 1, compositeScore: 100, decimalOdds: 1.8, oddsSource: 'tab' }),
+      buildPreScoredRunner({ name: 'Plodder', box: 8, compositeScore: 20, decimalOdds: 20.0, oddsSource: 'tab' }),
     ], 'safest')
 
     assert.equal(result.confidence, 92)
   })
 
-  test('allScores includes breakdown objects for each runner', () => {
-    const result = applyMode(field, 'safest')
-    assert.equal(result.allScores.length, field.length)
+  test('allScores includes breakdown objects, probabilities, and EV for each runner', () => {
+    const result = applyMode([
+      buildPreScoredRunner({ name: 'Anchor', box: 1, compositeScore: 70, decimalOdds: 3.0, oddsSource: 'tab', bestTime: 78 }),
+      buildPreScoredRunner({ name: 'Steady', box: 2, compositeScore: 60, decimalOdds: 3.4, oddsSource: 'tab', bestTime: 74 }),
+      buildPreScoredRunner({ name: 'Measured', box: 3, compositeScore: 55, decimalOdds: 3.8, oddsSource: 'tab', bestTime: 72 }),
+    ], 'safest')
+
+    assert.equal(result.allScores.length, 3)
     assert.ok(result.allScores[0].breakdown)
+    assert.equal(typeof result.allScores[0].winProbability, 'number')
+    assert.equal(typeof result.allScores[0].ev, 'number')
   })
 
   test('surfaces the empirical box bias source when the winning runner used it', () => {
@@ -364,12 +414,13 @@ describe('applyMode', () => {
   })
 
   test('throws for unrecognised mode', () => {
-    assert.throws(() => applyMode(field, 'unknown'), /unknown mode/i)
+    assert.throws(() => applyMode([buildPreScoredRunner({ name: 'Anchor', box: 1, compositeScore: 70 })], 'unknown'), /unknown mode/i)
   })
 
   test('handles a single-runner field gracefully', () => {
-    const result = applyMode([field[0]], 'safest')
+    const result = applyMode([buildPreScoredRunner({ name: 'Anchor', box: 1, compositeScore: 70 })], 'safest')
     assert.equal(result.runner.name, 'Anchor')
+    assert.equal(result.picks.length, 1)
   })
 })
 
@@ -380,52 +431,66 @@ describe('generateBestBets', () => {
       raceNumber: index,
       distance: 320 + index,
       estimatedStartTime: `1${index % 10}:0${index % 6}`,
-      runners: [
-        {
-          name: `Runner ${index}`,
-          box: ((index - 1) % 8) + 1,
-          distanceMeters: 320 + index,
-          lastStarts: overrides.lastStarts ?? (index <= 4 ? '1-1-1-1-1-1' : index <= 8 ? '1-2-2-2-3-3' : '3-4-4-5-5-6'),
-          bestTime: overrides.bestTime ?? (28.8 + (index * 0.05)),
-          trainerStrike: overrides.trainerStrike ?? Math.max(4, 30 - index),
-          careerTop3Pct: overrides.careerTop3Pct ?? Math.max(10, 85 - (index * 4)),
-          daysSinceLastRun: overrides.daysSinceLastRun ?? (index <= 4 ? 10 : index <= 8 ? 18 : 32),
-        },
+      runners: overrides.runners ?? [
+        buildPreScoredRunner({ name: `Race ${index} Anchor`, box: 1, compositeScore: 80 - index, decimalOdds: 2.8 + (index * 0.1), oddsSource: 'tab', bestTime: 78 }),
+        buildPreScoredRunner({ name: `Race ${index} Overlay`, box: 2, compositeScore: 55 + index, decimalOdds: 5.2 + (index * 0.2), oddsSource: 'tab', bestTime: 80 }),
+        buildPreScoredRunner({ name: `Race ${index} Longshot`, box: 3, compositeScore: 40 + index, decimalOdds: 10 + index, oddsSource: 'tab', bestTime: 82 }),
       ],
       ...overrides.race,
     }
   }
 
-  test('returns the top 10 picks ranked by composite score descending', () => {
-    const races = Array.from({ length: 12 }, (_, index) => buildRace(index + 1))
-    const picks = generateBestBets(races, 'safest')
+  test('returns the top 3 ranked picks for each mode', () => {
+    const races = Array.from({ length: 4 }, (_, index) => buildRace(index + 1))
+    const picks = generateBestBets(races)
 
-    assert.equal(picks.length, 10)
-    assert.equal(picks[0].rank, 1)
-    assert.equal(picks[9].rank, 10)
+    assert.deepEqual(Object.keys(picks), ['safest', 'value', 'longshot'])
+    assert.equal(picks.safest.length, 3)
+    assert.equal(picks.value.length, 3)
+    assert.equal(picks.longshot.length, 3)
 
-    for (let index = 1; index < picks.length; index += 1) {
-      assert.ok(picks[index - 1].compositeScore >= picks[index].compositeScore)
+    for (let index = 1; index < picks.safest.length; index += 1) {
+      assert.ok(picks.safest[index - 1].winProbability >= picks.safest[index].winProbability)
+    }
+
+    for (let index = 1; index < picks.value.length; index += 1) {
+      assert.ok((picks.value[index - 1].ev ?? -Infinity) >= (picks.value[index].ev ?? -Infinity))
+      assert.ok(picks.value[index - 1].rank < picks.value[index].rank)
+    }
+
+    for (let index = 1; index < picks.longshot.length; index += 1) {
+      assert.ok((picks.longshot[index - 1].ev ?? -Infinity) >= (picks.longshot[index].ev ?? -Infinity))
     }
   })
 
   test('handles an empty race list gracefully', () => {
-    assert.deepEqual(generateBestBets([], 'value'), [])
+    assert.deepEqual(generateBestBets([]), {
+      safest: [],
+      value: [],
+      longshot: [],
+    })
   })
 
   test('handles races with a single runner', () => {
-    const picks = generateBestBets([buildRace(1)], 'safest')
+    const picks = generateBestBets([buildRace(1, {
+      runners: [
+        buildPreScoredRunner({ name: 'Solo Runner', box: 1, compositeScore: 78 }),
+      ],
+    })])
 
-    assert.equal(picks.length, 1)
-    assert.equal(picks[0].runnerName, 'Runner 1')
-    assert.equal(picks[0].rank, 1)
+    assert.equal(picks.safest.length, 1)
+    assert.equal(picks.value.length, 1)
+    assert.equal(picks.longshot.length, 1)
+    assert.equal(picks.safest[0].runnerName, 'Solo Runner')
+    assert.equal(picks.safest[0].rank, 1)
   })
 
-  test('includes the selected mode and detailed breakdown in each pick', () => {
-    const picks = generateBestBets([buildRace(2)], 'longshot')
+  test('includes detailed pick metadata in each mode bucket', () => {
+    const picks = generateBestBets([buildRace(2)])
 
-    assert.equal(picks[0].mode, 'longshot')
-    assert.ok(picks[0].breakdown)
-    assert.equal(typeof picks[0].confidence, 'number')
+    assert.equal(picks.value[0].mode, 'value')
+    assert.ok(picks.value[0].breakdown)
+    assert.equal(typeof picks.value[0].confidence, 'number')
+    assert.ok('winProbability' in picks.value[0])
   })
 })

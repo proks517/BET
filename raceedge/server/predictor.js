@@ -36,6 +36,11 @@ function roundScore(value) {
   return clamp(Math.round(value))
 }
 
+function roundMetric(value, digits = 4) {
+  const factor = 10 ** digits
+  return Math.round((Number(value) || 0) * factor) / factor
+}
+
 function interpolate(value, inMin, inMax, outMin, outMax) {
   if (inMax === inMin) return outMax
   const ratio = clamp((value - inMin) / (inMax - inMin), 0, 1)
@@ -305,47 +310,82 @@ function scoreRunner(runner, fieldAvgTime) {
   return getCompositeScore(buildScoreBreakdown(runner, fieldAvgTime))
 }
 
-function buildReasoning(entry, rankedEntries, mode, fieldAvgTime) {
-  const rank = rankedEntries.findIndex(item => item.runner.name === entry.runner.name) + 1
-  const rankedFactors = Object.entries(entry.breakdown)
-    .sort((a, b) => b[1] - a[1])
+function getRunnerDecimalOdds(runner) {
+  return toNumber(runner.decimalOdds ?? runner.odds ?? runner.winOdds)
+}
+
+function hasPreScoredBreakdown(runner) {
+  return runner?.breakdown && toNumber(runner.compositeScore ?? runner.score) != null
+}
+
+function buildFactorSummary(breakdown) {
+  const phrases = {
+    recentForm: 'strong recent form',
+    bestTime: 'fast on the clock',
+    boxDraw: 'draw advantage',
+    classConsistency: 'reliable class profile',
+    trainerStrikeRate: 'trainer strike support',
+    daysSinceLastRun: 'ideal freshness',
+  }
+
+  const ranked = Object.entries(breakdown || {})
+    .sort((left, right) => right[1] - left[1])
     .slice(0, 2)
+    .map(([factor]) => phrases[factor] || FACTOR_LABELS[factor] || factor)
 
-  const parts = [`${entry.runner.name} ranks #${rank} of ${rankedEntries.length} on weighted composite scoring.`]
+  return ranked.length > 0
+    ? ranked.map((phrase, index) => index === 0 ? phrase.charAt(0).toUpperCase() + phrase.slice(1) : phrase).join(', ')
+    : 'Balanced six-factor profile'
+}
 
-  if (rankedFactors.length > 0) {
-    const summary = rankedFactors
-      .map(([factor, score]) => `${FACTOR_LABELS[factor] || factor} ${score}`)
-      .join(', ')
-    parts.push(`Best factors: ${summary}.`)
+function buildReasoning(entry, rankedEntries, mode) {
+  const parts = [buildFactorSummary(entry.breakdown)]
+
+  if (entry.ev != null) {
+    const edgeLabel = entry.ev >= 0 ? 'positive EV edge' : 'market underlay'
+    parts.push(`${edgeLabel} ${entry.ev >= 0 ? '+' : ''}${Math.round(entry.ev * 100)}%`)
+  } else if (mode === 'value') {
+    parts.push('value fallback on score strength')
+  } else if (mode === 'longshot') {
+    parts.push('outsider with a real speed signal')
   }
 
-  if (entry.runner.lastStarts) {
-    parts.push(`Recent form line: ${entry.runner.lastStarts}.`)
-  }
+  const rank = rankedEntries.findIndex(item => item.name === entry.name) + 1
+  parts.push(`rated #${rank} overall`)
 
-  if (toNumber(entry.runner.bestTime) != null && fieldAvgTime != null) {
-    const diff = fieldAvgTime - entry.runner.bestTime
-    if (diff > 0) {
-      parts.push(`Best time ${entry.runner.bestTime}s is ${diff.toFixed(2)}s quicker than the field average.`)
-    } else if (diff < 0) {
-      parts.push(`Best time ${entry.runner.bestTime}s is ${Math.abs(diff).toFixed(2)}s off the field average.`)
-    }
-  }
-
-  if (mode === 'value') {
-    const topScore = rankedEntries[0]?.compositeScore ?? entry.compositeScore
-    parts.push(`Chosen as the value play: within ${Math.abs(topScore - entry.compositeScore)} points of the top scorer without being the headline pick.`)
-  }
-
-  if (mode === 'longshot') {
-    parts.push(`Chosen as the long shot: ranked outside the top three overall but still carrying a real speed edge.`)
-  }
-
-  return parts.join(' ')
+  return parts.join(' • ')
 }
 
 function buildScoredEntry(runner, fieldAvgTime, fieldSize) {
+  const decimalOdds = getRunnerDecimalOdds(runner)
+  const oddsSource = runner.oddsSource ?? null
+
+  if (hasPreScoredBreakdown(runner)) {
+    const compositeScore = roundScore(toNumber(runner.compositeScore ?? runner.score))
+    const breakdown = {
+      recentForm: roundScore(runner.breakdown.recentForm ?? 0),
+      bestTime: roundScore(runner.breakdown.bestTime ?? 0),
+      boxDraw: roundScore(runner.breakdown.boxDraw ?? 0),
+      classConsistency: roundScore(runner.breakdown.classConsistency ?? 0),
+      trainerStrikeRate: roundScore(runner.breakdown.trainerStrikeRate ?? 0),
+      daysSinceLastRun: roundScore(runner.breakdown.daysSinceLastRun ?? 0),
+    }
+
+    return {
+      runnerData: {
+        ...runner,
+        odds: decimalOdds,
+        decimalOdds,
+        oddsSource,
+      },
+      breakdown,
+      compositeScore,
+      score: compositeScore,
+      confidence: Math.min(92, Math.round((compositeScore / MAX_COMPOSITE_SCORE) * 100)),
+      boxBiasSource: runner.boxBiasSource ?? 'default',
+    }
+  }
+
   const enrichedRunner = {
     ...runner,
     fieldSize: runner.fieldSize ?? fieldSize,
@@ -354,7 +394,12 @@ function buildScoredEntry(runner, fieldAvgTime, fieldSize) {
   const compositeScore = getCompositeScore(breakdown)
 
   return {
-    runner,
+    runnerData: {
+      ...runner,
+      odds: decimalOdds,
+      decimalOdds,
+      oddsSource,
+    },
     breakdown,
     compositeScore,
     score: compositeScore,
@@ -363,8 +408,116 @@ function buildScoredEntry(runner, fieldAvgTime, fieldSize) {
   }
 }
 
+function calculateWinProbabilities(runners) {
+  if (!Array.isArray(runners) || runners.length === 0) return []
+
+  const scores = runners.map(runner => Math.max(0, toNumber(runner.compositeScore ?? runner.score) ?? 0))
+  const totalScore = scores.reduce((sum, score) => sum + score, 0)
+
+  if (totalScore <= 0) {
+    const evenProbability = 1 / runners.length
+    let assigned = 0
+
+    return runners.map((runner, index) => {
+      const winProbability = index === runners.length - 1
+        ? roundMetric(1 - assigned, 6)
+        : roundMetric(evenProbability, 6)
+      assigned += winProbability
+      return { ...runner, winProbability }
+    })
+  }
+
+  let assigned = 0
+  return runners.map((runner, index) => {
+    const rawProbability = scores[index] / totalScore
+    const winProbability = index === runners.length - 1
+      ? roundMetric(1 - assigned, 6)
+      : roundMetric(rawProbability, 6)
+    assigned += winProbability
+    return { ...runner, winProbability }
+  })
+}
+
+function calculateEV(winProbability, decimalOdds) {
+  const probability = toNumber(winProbability)
+  const odds = toNumber(decimalOdds)
+  if (probability == null || odds == null) return null
+  return roundMetric((probability * odds) - 1, 4)
+}
+
+function calculateExpectedReturn(stake, winProbability, decimalOdds) {
+  const probability = toNumber(winProbability)
+  const odds = toNumber(decimalOdds)
+  if (probability == null || odds == null) return null
+  return roundMetric((probability * odds) - (1 - probability), 4)
+}
+
+function classifyOdds(decimalOdds) {
+  const odds = toNumber(decimalOdds)
+  if (odds == null) return null
+  if (odds < 1.8) return 'hotpot'
+  if (odds < 3.0) return 'favourite'
+  if (odds < 6.0) return 'midfield'
+  if (odds < 13.0) return 'roughie'
+  return 'longshot'
+}
+
+function buildRunnerView(entry) {
+  const decimalOdds = entry.runnerData.decimalOdds
+
+  return {
+    name: entry.runnerData.name,
+    box: entry.runnerData.box ?? null,
+    barrier: entry.runnerData.barrier ?? null,
+    lastStarts: entry.runnerData.lastStarts,
+    bestTime: entry.runnerData.bestTime,
+    trainer: entry.runnerData.trainer,
+    compositeScore: entry.compositeScore,
+    score: entry.compositeScore,
+    confidence: entry.confidence,
+    breakdown: {
+      recentForm: entry.breakdown.recentForm,
+      bestTime: entry.breakdown.bestTime,
+      boxDraw: entry.breakdown.boxDraw,
+      classConsistency: entry.breakdown.classConsistency,
+      trainerStrikeRate: entry.breakdown.trainerStrikeRate,
+      daysSinceLastRun: entry.breakdown.daysSinceLastRun,
+    },
+    boxBiasSource: entry.boxBiasSource,
+    decimalOdds,
+    odds: decimalOdds,
+    oddsSource: entry.runnerData.oddsSource ?? null,
+    oddsClassification: classifyOdds(decimalOdds),
+    runnerData: entry.runnerData,
+  }
+}
+
+function buildFallbackPicks(allRunners, limit = 1) {
+  return allRunners
+    .slice(0, Math.max(1, limit))
+    .map((runner, index, collection) => ({
+      ...runner,
+      rank: index + 1,
+      summary: buildReasoning(runner, collection, 'fallback'),
+    }))
+}
+
+function buildRankedFallbackPicks(sortedRunners, limit = 1, mode = 'fallback') {
+  const ranked = Array.isArray(sortedRunners) && sortedRunners.length > 0
+    ? sortedRunners
+    : []
+
+  return ranked
+    .slice(0, Math.max(1, limit))
+    .map((runner, index) => ({
+      ...runner,
+      rank: index + 1,
+      summary: buildReasoning(runner, ranked, mode),
+    }))
+}
+
 /**
- * Select the best runner for the given mode.
+ * Select up to three runners for the given mode.
  * @param {import('./scraper').RunnerData[]} runners
  * @param {'safest'|'value'|'longshot'} mode
  */
@@ -384,110 +537,186 @@ function applyMode(runners, mode) {
 
   const scored = runners
     .map(runner => buildScoredEntry(runner, fieldAvgTime, fieldSize))
-    .sort((a, b) => b.compositeScore - a.compositeScore || (a.runner.odds ?? Infinity) - (b.runner.odds ?? Infinity))
+    .sort((left, right) => (
+      right.compositeScore - left.compositeScore ||
+      (left.runnerData.decimalOdds ?? Infinity) - (right.runnerData.decimalOdds ?? Infinity)
+    ))
 
-  const topEntry = scored[0]
-  let selected = topEntry
+  const allRunners = calculateWinProbabilities(scored.map(buildRunnerView)).map((runner, index, collection) => ({
+    ...runner,
+    ev: calculateEV(runner.winProbability, runner.decimalOdds),
+    expectedReturn: calculateExpectedReturn(1, runner.winProbability, runner.decimalOdds),
+    summary: buildReasoning(runner, collection, mode),
+    rank: index + 1,
+  }))
 
-  if (mode === 'value') {
-    const candidates = scored.filter((entry, index) =>
-      index > 0 &&
-      entry.compositeScore > 55 &&
-      (topEntry.compositeScore - entry.compositeScore) <= 15
-    )
-    selected = candidates[0] || scored[Math.min(1, scored.length - 1)]
+  const oddsAvailable = allRunners.some(runner => runner.decimalOdds != null)
+  const oddsSource = allRunners.find(runner => runner.decimalOdds != null)?.oddsSource || null
+  const leader = allRunners[0]
+  let qualified = []
+  let sortedCandidates = []
+  let fallbackCandidates = allRunners
+
+  if (oddsAvailable) {
+    if (mode === 'safest') {
+      sortedCandidates = allRunners
+        .filter(runner => runner.decimalOdds != null)
+        .sort((left, right) => (
+          right.winProbability - left.winProbability ||
+          right.compositeScore - left.compositeScore
+        ))
+      qualified = sortedCandidates.filter(runner =>
+        runner.winProbability > 0.25 &&
+        runner.decimalOdds >= 1.5 &&
+        runner.decimalOdds <= 4.0 &&
+        runner.ev != null &&
+        runner.ev > -0.10
+      ).slice(0, 3)
+      fallbackCandidates = sortedCandidates
+    } else if (mode === 'value') {
+      sortedCandidates = allRunners
+        .filter(runner => runner.decimalOdds != null)
+        .sort((left, right) => (
+          (right.ev ?? -Infinity) - (left.ev ?? -Infinity) ||
+          right.compositeScore - left.compositeScore
+        ))
+      qualified = sortedCandidates.filter(runner =>
+        runner.ev != null &&
+        runner.ev > 0.15 &&
+        runner.winProbability > 0.15 &&
+        runner.decimalOdds >= 3.0 &&
+        runner.decimalOdds <= 10.0
+      ).slice(0, 3)
+      fallbackCandidates = sortedCandidates
+    } else if (mode === 'longshot') {
+      sortedCandidates = allRunners
+        .filter(runner => runner.decimalOdds != null)
+        .sort((left, right) => (
+          (right.ev ?? -Infinity) - (left.ev ?? -Infinity) ||
+          right.compositeScore - left.compositeScore
+        ))
+      qualified = sortedCandidates.filter(runner =>
+        runner.decimalOdds >= 8.0 &&
+        runner.winProbability > 0.08 &&
+        (
+          (runner.breakdown?.bestTime ?? 0) > 70 ||
+          (runner.breakdown?.recentForm ?? 0) > 70
+        )
+      ).slice(0, 3)
+      fallbackCandidates = sortedCandidates
+    }
+  } else if (mode === 'safest') {
+    qualified = allRunners.slice(0, 3)
+    fallbackCandidates = allRunners
+  } else if (mode === 'value') {
+    qualified = allRunners
+      .filter((runner, index) =>
+        index > 0 &&
+        runner.compositeScore > 55 &&
+        leader &&
+        (leader.compositeScore - runner.compositeScore) <= 20
+      )
+      .slice(0, 3)
+    fallbackCandidates = allRunners
   } else if (mode === 'longshot') {
-    const candidates = scored.filter((entry, index) =>
-      index >= 3 &&
-      entry.compositeScore > 40 &&
-      entry.breakdown.bestTime > 70
-    )
-    selected = candidates[0] || scored[Math.min(3, scored.length - 1)]
+    qualified = allRunners
+      .filter((runner, index) =>
+        index >= 3 &&
+        runner.compositeScore > 35 &&
+        (runner.breakdown?.bestTime ?? 0) > 70
+      )
+      .slice(0, 3)
+    fallbackCandidates = allRunners
   }
 
-  const reasoning = buildReasoning(selected, scored, mode, fieldAvgTime)
+  const picks = qualified.length > 0
+    ? qualified.map((runner, index) => ({ ...runner, rank: index + 1 }))
+    : buildRankedFallbackPicks(fallbackCandidates, 1, mode)
+
+  const topPick = picks[0]
 
   return {
-    runner: selected.runner,
-    score: selected.compositeScore,
-    compositeScore: selected.compositeScore,
-    confidence: selected.confidence,
-    breakdown: {
-      recentForm: selected.breakdown.recentForm,
-      bestTime: selected.breakdown.bestTime,
-      boxDraw: selected.breakdown.boxDraw,
-      classConsistency: selected.breakdown.classConsistency,
-      trainerStrikeRate: selected.breakdown.trainerStrikeRate,
-      daysSinceLastRun: selected.breakdown.daysSinceLastRun,
-    },
-    boxBiasSource: selected.boxBiasSource,
+    runner: topPick.runnerData,
+    score: topPick.compositeScore,
+    compositeScore: topPick.compositeScore,
+    confidence: topPick.confidence,
+    breakdown: topPick.breakdown,
+    boxBiasSource: topPick.boxBiasSource,
     mode,
-    reasoning,
-    allScores: scored.map(entry => ({
-      name: entry.runner.name,
-      box: entry.runner.box,
-      barrier: entry.runner.barrier,
-      odds: entry.runner.odds,
-      lastStarts: entry.runner.lastStarts,
-      bestTime: entry.runner.bestTime,
-      trainer: entry.runner.trainer,
-      score: entry.compositeScore,
-      compositeScore: entry.compositeScore,
-      confidence: entry.confidence,
-      breakdown: {
-        recentForm: entry.breakdown.recentForm,
-        bestTime: entry.breakdown.bestTime,
-        boxDraw: entry.breakdown.boxDraw,
-        classConsistency: entry.breakdown.classConsistency,
-        trainerStrikeRate: entry.breakdown.trainerStrikeRate,
-        daysSinceLastRun: entry.breakdown.daysSinceLastRun,
-      },
-      boxBiasSource: entry.boxBiasSource,
-    })),
+    reasoning: topPick.summary,
+    oddsAvailable,
+    oddsSource,
+    picks,
+    allRunners,
+    allScores: allRunners,
   }
 }
 
-function generateBestBets(allRaces, mode) {
+function generateBestBets(allRaces) {
   if (!Array.isArray(allRaces) || allRaces.length === 0) {
-    return []
+    return { safest: [], value: [], longshot: [] }
   }
 
-  const picks = allRaces
-    .filter(race => Array.isArray(race.runners) && race.runners.length > 0)
-    .map(race => {
-      const prediction = applyMode(race.runners, mode)
+  const modes = ['safest', 'value', 'longshot']
 
-      return {
-        track: race.track,
-        raceNumber: race.raceNumber,
-        distance: race.distance ?? getDistanceMeters(prediction.runner) ?? null,
-        grade: race.grade ?? prediction.runner.grade ?? null,
-        runnerName: prediction.runner.name,
-        box: prediction.runner.box ?? prediction.runner.barrier ?? null,
-        compositeScore: prediction.compositeScore ?? prediction.score,
-        confidence: prediction.confidence,
-        mode,
-        breakdown: prediction.breakdown,
-        estimatedStartTime: race.estimatedStartTime ?? null,
-        reasoning: prediction.reasoning,
-        allScores: prediction.allScores,
-        runner: prediction.runner,
-        boxBiasSource: prediction.boxBiasSource,
-      }
-    })
-    .sort((left, right) =>
-      (right.compositeScore - left.compositeScore) ||
-      (right.confidence - left.confidence) ||
-      String(left.track).localeCompare(String(right.track)) ||
-      ((left.raceNumber || 0) - (right.raceNumber || 0))
-    )
-    .slice(0, 10)
-    .map((pick, index) => ({
-      rank: index + 1,
-      ...pick,
-    }))
+  return Object.fromEntries(modes.map(mode => {
+    const picks = allRaces
+      .filter(race => Array.isArray(race.runners) && race.runners.length > 0)
+      .map(race => {
+        const prediction = applyMode(race.runners, mode)
+        const pick = prediction.picks[0]
+        if (!pick) return null
 
-  return picks
+        return {
+          track: race.track,
+          raceNumber: race.raceNumber,
+          distance: race.distance ?? getDistanceMeters(pick.runnerData) ?? null,
+          grade: race.grade ?? pick.runnerData.grade ?? null,
+          runnerName: pick.name,
+          box: pick.box ?? pick.barrier ?? null,
+          compositeScore: pick.compositeScore,
+          winProbability: pick.winProbability,
+          decimalOdds: pick.decimalOdds,
+          ev: pick.ev,
+          expectedReturn: pick.expectedReturn,
+          oddsClassification: pick.oddsClassification,
+          oddsSource: pick.oddsSource,
+          confidence: pick.confidence,
+          mode,
+          breakdown: pick.breakdown,
+          estimatedStartTime: race.estimatedStartTime ?? null,
+          reasoning: pick.summary,
+          allRunners: prediction.allRunners,
+          runner: pick.runnerData,
+          boxBiasSource: pick.boxBiasSource,
+        }
+      })
+      .filter(Boolean)
+      .sort((left, right) => (
+        mode === 'safest'
+          ? (
+            right.winProbability - left.winProbability ||
+            right.compositeScore - left.compositeScore ||
+            (right.ev ?? -Infinity) - (left.ev ?? -Infinity) ||
+            String(left.track).localeCompare(String(right.track)) ||
+            ((left.raceNumber || 0) - (right.raceNumber || 0))
+          )
+          : (
+            (right.ev ?? -Infinity) - (left.ev ?? -Infinity) ||
+            right.winProbability - left.winProbability ||
+            right.compositeScore - left.compositeScore ||
+            String(left.track).localeCompare(String(right.track)) ||
+            ((left.raceNumber || 0) - (right.raceNumber || 0))
+          )
+      ))
+      .slice(0, 3)
+      .map((pick, index) => ({
+        rank: index + 1,
+        ...pick,
+      }))
+
+    return [mode, picks]
+  }))
 }
 
 module.exports = {
@@ -501,6 +730,10 @@ module.exports = {
   scoreClassConsistency,
   scoreTrainerStrikeRate,
   scoreDaysSinceLastRun,
+  calculateWinProbabilities,
+  calculateEV,
+  calculateExpectedReturn,
+  classifyOdds,
   applyMode,
   generateBestBets,
 }

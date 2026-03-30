@@ -726,6 +726,186 @@ select:focus {
   font-weight: 700;
 }
 
+.odds-entry-shell,
+.odds-entry-panel,
+.odds-entry-table,
+.top-picks-shell,
+.top-picks-grid,
+.top-pick-heading,
+.pick-metric-grid,
+.pick-metric-card,
+.best-bets-buckets,
+.best-bets-bucket,
+.bucket-heading-row,
+.best-bet-metrics {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.odds-entry-panel {
+  padding: 16px;
+  border: 1px solid rgba(45, 90, 142, 0.45);
+  border-radius: var(--radius);
+  background: rgba(9, 14, 26, 0.7);
+}
+
+.odds-entry-toggle {
+  justify-content: space-between;
+}
+
+.odds-entry-table {
+  gap: 10px;
+}
+
+.odds-entry-header,
+.odds-entry-row,
+.best-bet-metrics,
+.bucket-heading-row,
+.pick-metric-grid {
+  display: grid;
+  align-items: center;
+  gap: 12px;
+}
+
+.odds-entry-header,
+.odds-entry-row {
+  grid-template-columns: 70px minmax(0, 1.5fr) minmax(110px, 0.9fr) minmax(110px, 0.9fr);
+}
+
+.odds-entry-header {
+  padding-inline: 4px;
+  font-size: 0.72rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--text-secondary);
+}
+
+.odds-entry-row {
+  padding: 10px 0;
+  border-top: 1px solid rgba(30, 58, 95, 0.4);
+}
+
+.odds-entry-row:first-of-type {
+  border-top: 0;
+}
+
+.odds-entry-runner {
+  min-width: 0;
+  font-weight: 700;
+}
+
+.top-picks-shell {
+  gap: 18px;
+}
+
+.top-picks-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 16px;
+}
+
+.top-picks-grid.trackside {
+  grid-template-columns: 1fr;
+}
+
+.top-pick-card.featured {
+  box-shadow: 0 0 0 1px rgba(240, 180, 41, 0.18), var(--shadow);
+}
+
+.top-pick-heading {
+  min-width: 0;
+}
+
+.runner-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  align-items: center;
+}
+
+.pick-metric-grid {
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+}
+
+.pick-metric-card {
+  padding: 14px;
+  border: 1px solid rgba(30, 58, 95, 0.5);
+  border-radius: var(--radius);
+  background: rgba(11, 17, 29, 0.72);
+}
+
+.pick-metric-card strong {
+  font-family: var(--font-mono);
+  font-size: 1.15rem;
+  color: var(--text-primary);
+}
+
+.edge-pill {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 34px;
+  padding: 0 12px;
+  border-radius: 999px;
+  border: 1px solid rgba(30, 58, 95, 0.5);
+  background: rgba(11, 17, 29, 0.9);
+  font-weight: 800;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  font-size: 0.76rem;
+}
+
+.edge-pill.good {
+  border-color: rgba(16, 185, 129, 0.4);
+  color: #86efac;
+}
+
+.edge-pill.warn {
+  border-color: rgba(245, 158, 11, 0.38);
+  color: #fcd34d;
+}
+
+.edge-pill.bad {
+  border-color: rgba(239, 68, 68, 0.38);
+  color: #fca5a5;
+}
+
+.edge-pill.neutral {
+  color: var(--text-secondary);
+}
+
+.edge-pill.large {
+  min-height: 100%;
+  padding: 14px 12px;
+}
+
+.edge-pill.compact {
+  min-height: 28px;
+  padding-inline: 10px;
+  font-size: 0.7rem;
+}
+
+.breakdown-row.compact {
+  grid-template-columns: minmax(120px, 1.1fr) minmax(0, 4fr) 36px;
+}
+
+.best-bets-buckets {
+  gap: 18px;
+}
+
+.best-bets-bucket {
+  gap: 16px;
+}
+
+.bucket-heading-row {
+  grid-template-columns: 1fr auto;
+}
+
+.best-bet-metrics {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
 .table-shell {
   overflow-x: auto;
 }
@@ -1541,7 +1721,10 @@ select:focus {
   .mode-performance-grid,
   .box-performance-grid,
   .best-bets-grid,
-  .ai-performance-grid {
+  .ai-performance-grid,
+  .top-picks-grid,
+  .pick-metric-grid,
+  .best-bet-metrics {
     grid-template-columns: 1fr;
   }
 
@@ -1573,6 +1756,21 @@ select:focus {
 
   .best-bet-head {
     grid-template-columns: 1fr;
+  }
+
+  .odds-entry-header,
+  .odds-entry-row {
+    grid-template-columns: 56px minmax(0, 1fr);
+  }
+
+  .odds-entry-header span:nth-child(3),
+  .odds-entry-header span:nth-child(4) {
+    display: none;
+  }
+
+  .odds-entry-row input,
+  .odds-entry-row .edge-pill {
+    grid-column: 2;
   }
 }
 

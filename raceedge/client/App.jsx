@@ -132,6 +132,49 @@ function formatSignedCurrency(value) {
   return `${amount >= 0 ? '+' : '-'}$${Math.abs(amount).toFixed(2)}`
 }
 
+function formatProbability(probability) {
+  const numeric = Number(probability)
+  if (!Number.isFinite(numeric)) return '—'
+  return `${Math.round(numeric * 100)}%`
+}
+
+function formatOdds(odds) {
+  const numeric = Number(odds)
+  if (!Number.isFinite(numeric)) return 'NO ODDS'
+  return `$${numeric.toFixed(2)}`
+}
+
+function formatEdge(ev) {
+  const numeric = Number(ev)
+  if (!Number.isFinite(numeric)) return 'NO ODDS'
+  const edgePct = Math.round(numeric * 100)
+  return `${edgePct >= 0 ? '+' : ''}${edgePct}% EDGE`
+}
+
+function getEdgeTone(ev) {
+  const numeric = Number(ev)
+  if (!Number.isFinite(numeric)) return 'neutral'
+  if (numeric > 0) return 'good'
+  if (numeric >= -0.1) return 'warn'
+  return 'bad'
+}
+
+function buildManualOddsRows(runners = []) {
+  return runners.map(runner => ({
+    box: runner.box ?? runner.barrier ?? null,
+    runnerName: runner.name,
+    decimalOdds: runner.decimalOdds != null ? String(runner.decimalOdds) : '',
+    winProbability: runner.winProbability ?? null,
+  }))
+}
+
+function calculateManualEV(winProbability, decimalOdds) {
+  const probability = Number(winProbability)
+  const odds = Number(decimalOdds)
+  if (!Number.isFinite(probability) || !Number.isFinite(odds)) return null
+  return (probability * odds) - 1
+}
+
 function getHeroWinRateTone(winRate) {
   if (winRate > 35) return 'good'
   if (winRate >= 20) return 'warn'
@@ -289,6 +332,9 @@ function App() {
   const [journalEntries, setJournalEntries] = useState([])
   const [journalLoading, setJournalLoading] = useState(false)
   const [expandedJournalId, setExpandedJournalId] = useState(null)
+  const [manualOddsOpen, setManualOddsOpen] = useState(false)
+  const [manualOddsRows, setManualOddsRows] = useState([])
+  const [applyingOdds, setApplyingOdds] = useState(false)
   const bestBetsStreamRef = useRef(null)
 
   const loadStats = useCallback(() => {
@@ -444,6 +490,18 @@ function App() {
     loadBoxBias(boxBiasTrack, boxBiasDistance)
   }, [boxBiasTrack, boxBiasDistance, loadBoxBias])
 
+  useEffect(() => {
+    if (!result?.allRunners?.length) {
+      setManualOddsRows([])
+      setManualOddsOpen(false)
+      return
+    }
+
+    setManualOddsRows(buildManualOddsRows(result.allRunners))
+    setOdds(result.odds != null ? String(result.odds) : '')
+    setManualOddsOpen(!result.oddsAvailable)
+  }, [result])
+
   useEffect(() => () => {
     closeBestBetsStream()
   }, [closeBestBetsStream])
@@ -536,6 +594,64 @@ function App() {
     }
   }
 
+  function handleManualOddsChange(index, value) {
+    setManualOddsRows(current => current.map((row, rowIndex) => (
+      rowIndex === index
+        ? { ...row, decimalOdds: value }
+        : row
+    )))
+  }
+
+  async function handleApplyOdds() {
+    if (!result?.predictionId) return
+
+    const parsedOdds = manualOddsRows
+      .map(row => ({
+        box: row.box,
+        runnerName: row.runnerName,
+        decimalOdds: parseFloat(row.decimalOdds),
+      }))
+      .filter(row => Number.isFinite(row.decimalOdds) && row.decimalOdds >= 1.01)
+
+    if (parsedOdds.length === 0) {
+      setError('Enter at least one valid decimal price before applying odds.')
+      return
+    }
+
+    setApplyingOdds(true)
+    try {
+      const response = await fetch('/api/apply-odds', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          predictionId: result.predictionId,
+          odds: parsedOdds,
+        }),
+      })
+      const data = await response.json()
+      if (!response.ok) throw new Error(data.error || 'Failed to apply manual odds')
+
+      setResult(current => ({
+        ...current,
+        ...data,
+        aiAnalysis: current?.aiAnalysis ?? null,
+        sourcesUsed: current?.sourcesUsed || [],
+        sourcesSkipped: current?.sourcesSkipped || [],
+        warning: current?.warning || null,
+      }))
+      setNotice({
+        kind: 'success',
+        message: `Odds applied. ${data.picks?.length || 0} pick${data.picks?.length === 1 ? '' : 's'} recalculated with EV.`,
+      })
+      loadPredictions()
+      loadJournal()
+    } catch (e) {
+      setError(e.message)
+    } finally {
+      setApplyingOdds(false)
+    }
+  }
+
   async function handleCheckResults() {
     setCheckingResults(true)
     try {
@@ -604,7 +720,7 @@ function App() {
       mode: bestBetsMode,
     })
 
-    appendBestBetsLog(`⏳ Starting day scan for ${bestBetsDate} (${bestBetsType}, ${bestBetsMode})...`)
+    appendBestBetsLog(`⏳ Starting day scan for ${bestBetsDate} (${bestBetsType}, all modes)...`)
 
     const stream = new EventSource(`/api/best-bets/stream?${params.toString()}`)
     let completed = false
@@ -776,6 +892,27 @@ function App() {
         }
       })
     : []
+  const displayedPicks = tracksideMode
+    ? (result?.picks || []).slice(0, 1)
+    : (result?.picks || [])
+  const currentTopPick = result?.picks?.[0] || null
+  const bestBetsBuckets = [
+    {
+      key: 'safest',
+      title: "Today's Safest Bets",
+      picks: bestBetsResult?.picks?.safest || [],
+    },
+    {
+      key: 'value',
+      title: "Today's Value Bets",
+      picks: bestBetsResult?.picks?.value || [],
+    },
+    {
+      key: 'longshot',
+      title: "Today's Long Shots",
+      picks: bestBetsResult?.picks?.longshot || [],
+    },
+  ]
 
   return (
     <div className={`app-shell ${tracksideMode ? 'trackside-mode' : ''}`}>
@@ -919,6 +1056,60 @@ function App() {
                   {loadMsg && <div className="terminal-status">{loadMsg}</div>}
                 </div>
               )}
+
+              {result && (
+                <div className="odds-entry-shell">
+                  <button
+                    className={`panel-button secondary odds-entry-toggle ${manualOddsOpen ? 'open' : ''}`}
+                    onClick={() => setManualOddsOpen(current => !current)}
+                  >
+                    <span>ODDS ENTRY</span>
+                    <span>{manualOddsOpen ? '−' : '+'}</span>
+                  </button>
+
+                  {manualOddsOpen && (
+                    <div className="odds-entry-panel">
+                      <div className="dashboard-copy">
+                        {result.oddsAvailable
+                          ? 'Adjust the current market prices to re-rank the race by expected value.'
+                          : 'Odds not scraped — enter manually for EV calculation.'}
+                      </div>
+
+                      <div className="odds-entry-table">
+                        <div className="odds-entry-header">
+                          <span>Box</span>
+                          <span>Runner</span>
+                          <span>Odds</span>
+                          <span>Live EV</span>
+                        </div>
+
+                        {manualOddsRows.map((row, index) => {
+                          const previewEv = calculateManualEV(row.winProbability, row.decimalOdds)
+                          return (
+                            <div className="odds-entry-row" key={`${row.runnerName}-${row.box ?? index}`}>
+                              <span className={`box-pill compact ${getBoxBadgeClass(row.box)}`}>{row.box ?? '—'}</span>
+                              <span className="odds-entry-runner">{row.runnerName}</span>
+                              <input
+                                type="number"
+                                min="1.01"
+                                step="0.05"
+                                value={row.decimalOdds}
+                                onChange={event => handleManualOddsChange(index, event.target.value)}
+                              />
+                              <span className={`edge-pill ${getEdgeTone(previewEv)}`}>{formatEdge(previewEv)}</span>
+                            </div>
+                          )
+                        })}
+                      </div>
+
+                      <button className={`panel-button ${applyingOdds ? 'loading' : ''}`} onClick={handleApplyOdds} disabled={applyingOdds}>
+                        <span className={applyingOdds ? 'button-spinner' : ''} />
+                        <span>{applyingOdds ? 'APPLYING ODDS...' : 'APPLY ODDS'}</span>
+                      </button>
+                    </div>
+                  )}
+                </div>
+              )}
             </div>
           </div>
         </aside>
@@ -942,62 +1133,109 @@ function App() {
 
           {result && !loading && (
             <div className={`results-panel ${tracksideMode ? 'trackside' : ''}`}>
-              <section className={`top-pick-card ${tracksideMode ? 'trackside' : ''}`}>
-                <div className="section-eyebrow">Top Pick</div>
-                <div className="top-pick-head">
+              <section className={`dashboard-card top-picks-shell ${tracksideMode ? 'trackside' : ''}`}>
+                <div className="tab-toolbar">
                   <div>
-                    <div className="runner-name">{result.runner}</div>
-                    <div className="runner-meta">
-                      {result.box && <span className={`box-pill ${getBoxBadgeClass(result.box)}`}>BOX {result.box}</span>}
-                      {result.barrier && <span className="meta-pill">Barrier {result.barrier}</span>}
-                      {result.distance && <span className="meta-pill">{result.distance}m</span>}
-                      {result.odds && <span className="meta-pill">${result.odds.toFixed(2)}</span>}
-                      <span className="meta-pill">{formatModeLabel(mode)}</span>
-                    </div>
+                    <div className="section-eyebrow">Top Picks</div>
+                    <div className="section-title">Mode-Calibrated EV Board</div>
+                    <div className="dashboard-copy">Three ranked selections built from model probability, current odds, and expected value.</div>
                   </div>
-                  <div className="confidence-cluster">
-                    <div className="confidence-caption">Confidence</div>
-                    <div className="confidence-number">{result.confidence}%</div>
+                  <div className="journal-chip-row">
+                    <span className={`edge-pill ${result.oddsAvailable ? 'good' : 'neutral'}`}>
+                      {result.oddsAvailable ? `Odds source: ${result.oddsSource || 'market'}` : 'Odds pending'}
+                    </span>
+                    <span className="meta-pill">{formatModeLabel(result.mode)}</span>
+                    {result.distance && <span className="meta-pill">{result.distance}m</span>}
                   </div>
                 </div>
 
-                <div className="confidence-meter">
-                  <div className="confidence-meter-fill" style={{ width: `${result.confidence}%` }} />
-                </div>
-
-                <div className="top-pick-reasoning">{result.reasoning}</div>
-
-                {result.breakdown && (
-                  <div className="breakdown-grid">
-                    {SCORE_FACTORS.map(factor => {
-                      const score = result.breakdown[factor.key] ?? 0
-                      return (
-                        <div className="breakdown-row" key={factor.key}>
-                          <div className="breakdown-label-group">
-                            <span>{factor.label}</span>
-                            <span>{factor.weight}</span>
+                <div className={`top-picks-grid ${tracksideMode ? 'trackside' : ''}`}>
+                  {displayedPicks.map((pick, index) => (
+                    <article className={`top-pick-card ${index === 0 ? 'featured' : ''}`} key={`${pick.name}-${pick.rank}`}>
+                      <div className="top-pick-head">
+                        <div className="top-pick-heading">
+                          <div className="journal-chip-row">
+                            <span className={`rank-badge ${pick.rank === 1 ? 'gold' : pick.rank === 2 ? 'silver' : 'bronze'}`}>#{pick.rank}</span>
+                            {(pick.box ?? pick.barrier) != null && (
+                              <span className={`box-pill ${getBoxBadgeClass(pick.box ?? pick.barrier)}`}>
+                                {pick.box != null ? `BOX ${pick.box}` : `BARRIER ${pick.barrier}`}
+                              </span>
+                            )}
                           </div>
-                          <div className="breakdown-bar-shell">
-                            <div className={`breakdown-bar ${getFactorTone(score)}`} style={{ width: `${score}%` }} />
+                          <div className="runner-name">{pick.name}</div>
+                          <div className="runner-meta">
+                            <span className="meta-pill">Win {formatProbability(pick.winProbability)}</span>
+                            <span className="meta-pill">{formatOdds(pick.decimalOdds)}</span>
+                            {pick.oddsClassification && <span className="meta-pill">{pick.oddsClassification}</span>}
                           </div>
-                          <div className="breakdown-score">{score}</div>
                         </div>
-                      )
-                    })}
-                  </div>
-                )}
+                        <div className="confidence-cluster">
+                          <div className="confidence-caption">Confidence</div>
+                          <div className="confidence-number">{pick.confidence}%</div>
+                        </div>
+                      </div>
 
-                {(tracksideMode || !recorded) && (
+                      <div className="pick-metric-grid">
+                        <div className="pick-metric-card">
+                          <span className="confidence-caption">Composite</span>
+                          <strong>{pick.compositeScore}</strong>
+                        </div>
+                        <div className="pick-metric-card">
+                          <span className="confidence-caption">Model Win %</span>
+                          <strong>{formatProbability(pick.winProbability)}</strong>
+                        </div>
+                        <div className="pick-metric-card">
+                          <span className="confidence-caption">Expected Return</span>
+                          <strong>{pick.expectedReturn != null ? `${pick.expectedReturn >= 0 ? '+' : ''}${Math.round(pick.expectedReturn * 100)}%` : '—'}</strong>
+                        </div>
+                        <div className={`edge-pill large ${getEdgeTone(pick.ev)}`}>
+                          {formatEdge(pick.ev)}
+                        </div>
+                      </div>
+
+                      <div>
+                        <div className="confidence-caption">Composite Score</div>
+                        <div className="confidence-meter">
+                          <div className="confidence-meter-fill" style={{ width: `${pick.compositeScore}%` }} />
+                        </div>
+                      </div>
+
+                      <div className="top-pick-reasoning">{pick.summary}</div>
+
+                      <div className="breakdown-grid">
+                        {SCORE_FACTORS.map(factor => {
+                          const score = pick.breakdown?.[factor.key] ?? 0
+                          return (
+                            <div className="breakdown-row compact" key={`${pick.name}-${factor.key}`}>
+                              <div className="breakdown-label-group">
+                                <span>{factor.label}</span>
+                                <span>{factor.weight}</span>
+                              </div>
+                              <div className="breakdown-bar-shell">
+                                <div className={`breakdown-bar ${getFactorTone(score)}`} style={{ width: `${score}%` }} />
+                              </div>
+                              <div className="breakdown-score">{score}</div>
+                            </div>
+                          )
+                        })}
+                      </div>
+                    </article>
+                  ))}
+                </div>
+
+                {currentTopPick && (tracksideMode || !recorded) && (
                   <div className={`record-panel ${tracksideMode ? 'trackside' : ''}`}>
+                    <div className="section-eyebrow">Result Tracker</div>
                     {!recorded ? (
                       <>
+                        <div className="dashboard-copy">Recording against #{currentTopPick.rank} {currentTopPick.name}.</div>
                         <label className="record-input">
                           <span>Odds</span>
                           <input
                             type="number"
                             step="0.05"
                             min="1"
-                            placeholder={result.odds?.toFixed(2) ?? '2.50'}
+                            placeholder={currentTopPick.decimalOdds?.toFixed(2) ?? '2.50'}
                             value={odds}
                             onChange={e => setOdds(e.target.value)}
                           />
@@ -1068,7 +1306,7 @@ function App() {
                 </section>
               )}
 
-              {!tracksideMode && result.allScores?.length > 0 && (
+              {!tracksideMode && result.allRunners?.length > 0 && (
                 <section className="dashboard-card">
                   <div className="section-title">Full Field</div>
                   <div className="table-shell">
@@ -1079,22 +1317,26 @@ function App() {
                           <th>Box</th>
                           <th>Name</th>
                           <th>Form</th>
-                          <th>Best Time</th>
+                          <th>Win %</th>
+                          <th>Odds</th>
+                          <th>EV</th>
                           <th>Composite</th>
                           <th>Factors</th>
                         </tr>
                       </thead>
                       <tbody>
-                        {result.allScores.map((runnerScore, index) => (
+                        {result.allRunners.map((runnerScore, index) => (
                           <tr
                             key={runnerScore.name}
-                            className={`${runnerScore.name === result.runner ? 'highlight' : ''} ${runnerScore.scratched ? 'scratched' : ''}`.trim()}
+                            className={`${runnerScore.name === currentTopPick?.name ? 'highlight' : ''} ${runnerScore.scratched ? 'scratched' : ''}`.trim()}
                           >
                             <td>{index + 1}</td>
                             <td><span className={`box-pill compact ${getBoxBadgeClass(runnerScore.box ?? runnerScore.barrier)}`}>{runnerScore.box ?? runnerScore.barrier ?? '—'}</span></td>
                             <td>{runnerScore.name}</td>
                             <td>{runnerScore.breakdown?.recentForm ?? '—'}</td>
-                            <td>{runnerScore.breakdown?.bestTime ?? '—'}</td>
+                            <td>{formatProbability(runnerScore.winProbability)}</td>
+                            <td>{runnerScore.decimalOdds != null ? `$${runnerScore.decimalOdds.toFixed(2)}` : '—'}</td>
+                            <td><span className={`edge-pill compact ${getEdgeTone(runnerScore.ev)}`}>{formatEdge(runnerScore.ev)}</span></td>
                             <td className="composite-cell">{runnerScore.compositeScore ?? runnerScore.score}</td>
                             <td>
                               <div className="factor-dot-row">
@@ -1160,7 +1402,7 @@ function App() {
                     <div className="tab-toolbar">
                       <div>
                         <div className="section-title">Today&apos;s Best Bets</div>
-                        <div className="dashboard-copy">Scan every meeting for a day, rank the strongest picks by composite score, and jump straight into a race for a deeper research pass.</div>
+                        <div className="dashboard-copy">Scan every meeting for a day, surface the strongest EV opportunities in each mode, and jump straight into a race for a deeper research pass.</div>
                       </div>
                     </div>
 
@@ -1179,22 +1421,6 @@ function App() {
                           <button className={`race-type-button ${bestBetsType === 'horse' ? 'active' : ''}`} onClick={() => setBestBetsType('horse')}>
                             🐎 HORSES
                           </button>
-                        </div>
-                      </div>
-
-                      <div>
-                        <div className="control-label">Mode</div>
-                        <div className="mode-card-grid best-bets-mode-grid">
-                          {MODE_CARDS.map(card => (
-                            <button
-                              key={`best-bets-${card.key}`}
-                              className={`mode-card ${card.accent} ${bestBetsMode === card.key ? 'active' : ''}`}
-                              onClick={() => setBestBetsMode(card.key)}
-                            >
-                              <span className="mode-icon">{card.icon}</span>
-                              <span className="mode-title">{card.label}</span>
-                            </button>
-                          ))}
                         </div>
                       </div>
 
@@ -1236,46 +1462,62 @@ function App() {
                     {bestBetsResult && (
                       <div className="best-bets-results">
                         <div className="best-bets-heading">
-                          <div className="section-eyebrow">TOP 10 PICKS FOR TODAY</div>
-                          <h3 className="best-bets-title">Top 10 Picks For {bestBetsResult.date}</h3>
+                          <div className="section-eyebrow">TODAY&apos;S CURATED BOARD</div>
+                          <h3 className="best-bets-title">Top EV Opportunities For {bestBetsResult.date}</h3>
                           <div className="dashboard-copy">Generated {formatTimestamp(bestBetsResult.generatedAt)} · {bestBetsResult.totalMeetings} meetings · {bestBetsResult.totalRacesScanned} races checked</div>
                           {bestBetsResult.cached && (
                             <div className="micro-note">Cached result from {bestBetsResult.cacheAgeMinutes || 0} minute(s) ago.</div>
                           )}
                         </div>
 
-                        <div className="best-bets-grid">
-                          {bestBetsResult.picks?.map(pick => (
-                            <article className="best-bet-card" key={`${pick.track}-${pick.raceNumber}-${pick.runnerName}`}>
-                              <div className="best-bet-head">
-                                <span className={`rank-badge ${pick.rank === 1 ? 'gold' : pick.rank === 2 ? 'silver' : pick.rank === 3 ? 'bronze' : 'rest'}`}>#{pick.rank}</span>
-                                <div className="best-bet-heading-copy">
-                                  <div className="best-bet-meta">{pick.track} · Race {pick.raceNumber} · {pick.distance ? `${pick.distance}m` : 'Distance TBC'}</div>
-                                  <div className="best-bet-runner">{pick.runnerName}</div>
+                        <div className="best-bets-buckets">
+                          {bestBetsBuckets.map(bucket => (
+                            <section className="best-bets-bucket" key={bucket.key}>
+                              <div className="bucket-heading-row">
+                                <div className="section-title">{bucket.title}</div>
+                                <span className={`mode-badge ${bucket.key}`}>{formatModeLabel(bucket.key)}</span>
+                              </div>
+
+                              {bucket.picks.length > 0 ? (
+                                <div className="best-bets-grid">
+                                  {bucket.picks.map(pick => (
+                                    <article className="best-bet-card" key={`${bucket.key}-${pick.track}-${pick.raceNumber}-${pick.runnerName}`}>
+                                      <div className="best-bet-head">
+                                        <span className={`rank-badge ${pick.rank === 1 ? 'gold' : pick.rank === 2 ? 'silver' : 'bronze'}`}>#{pick.rank}</span>
+                                        <div className="best-bet-heading-copy">
+                                          <div className="best-bet-meta">{pick.track} · Race {pick.raceNumber} · {pick.distance ? `${pick.distance}m` : 'Distance TBC'}</div>
+                                          <div className="best-bet-runner">{pick.runnerName}</div>
+                                        </div>
+                                        {pick.box != null && <span className={`box-pill ${getBoxBadgeClass(pick.box)}`}>BOX {pick.box}</span>}
+                                      </div>
+
+                                      <div className="best-bet-submeta">
+                                        {pick.estimatedStartTime && <span className="meta-pill">Start {pick.estimatedStartTime}</span>}
+                                        {pick.grade && <span className="meta-pill">{pick.grade}</span>}
+                                        <span className="meta-pill">Win {formatProbability(pick.winProbability)}</span>
+                                      </div>
+
+                                      <div className="best-bet-metrics">
+                                        <span className="meta-pill">{formatOdds(pick.decimalOdds)}</span>
+                                        <span className={`edge-pill ${getEdgeTone(pick.ev)}`}>{formatEdge(pick.ev)}</span>
+                                        <span className="journal-meta-pill">Composite {pick.compositeScore}</span>
+                                      </div>
+
+                                      <div className="confidence-caption">Confidence</div>
+                                      <div className="confidence-meter">
+                                        <div className="confidence-meter-fill" style={{ width: `${pick.confidence}%` }} />
+                                      </div>
+
+                                      <button className="panel-button quick-bet-button" onClick={() => handleQuickBet(pick)}>
+                                        QUICK BET
+                                      </button>
+                                    </article>
+                                  ))}
                                 </div>
-                                {pick.box != null && <span className={`box-pill ${getBoxBadgeClass(pick.box)}`}>BOX {pick.box}</span>}
-                              </div>
-
-                              <div className="best-bet-submeta">
-                                <span className="meta-pill">{formatModeLabel(pick.mode)}</span>
-                                {pick.estimatedStartTime && <span className="meta-pill">Start {pick.estimatedStartTime}</span>}
-                                {pick.grade && <span className="meta-pill">{pick.grade}</span>}
-                              </div>
-
-                              <div className="confidence-caption">Confidence</div>
-                              <div className="confidence-meter">
-                                <div className="confidence-meter-fill" style={{ width: `${pick.confidence}%` }} />
-                              </div>
-
-                              <div className="best-bet-footer">
-                                <strong>{pick.confidence}% confidence</strong>
-                                <span className="journal-meta-pill">Composite {pick.compositeScore}</span>
-                              </div>
-
-                              <button className="panel-button quick-bet-button" onClick={() => handleQuickBet(pick)}>
-                                QUICK BET
-                              </button>
-                            </article>
+                              ) : (
+                                <div className="empty-state-card">No qualifying {bucket.key} bets were found in this scan.</div>
+                              )}
+                            </section>
                           ))}
                         </div>
 

@@ -3,8 +3,11 @@ const cors    = require('cors')
 const path    = require('path')
 const {
   initDb,
+  getPrediction,
   savePrediction,
   getPredictions,
+  updatePredictionSelection,
+  updateJournalSelection,
   updateResult,
   getPendingPredictions,
   autoResolveResult,
@@ -29,6 +32,7 @@ const {
   fetchAllRacesForMeeting,
   fetchGreyhoundResult,
   fetchHorseResult,
+  fetchOddsForRace,
   closeBrowser,
 } = require('./scraper.js')
 const { applyMode, generateBestBets, getDefaultBoxBiasTable } = require('./predictor.js')
@@ -167,10 +171,10 @@ async function executeBestBetsScan({ date, type, mode, emit }) {
     generatedAt: new Date().toISOString(),
     date,
     type,
-    mode,
+    mode: 'all',
     totalRacesScanned,
     totalMeetings,
-    picks: generateBestBets(allRaces, mode),
+    picks: generateBestBets(allRaces),
     scanDurationMs: Date.now() - startedAt,
   }
 }
@@ -308,6 +312,68 @@ function formatResultCheckSummary(summary) {
   return `checked=${summary.checked}, resolved=${summary.resolved}, stillPending=${summary.stillPending}, errors=${summary.errors.length}`
 }
 
+function mergeManualOddsIntoRunners(runners, oddsRows) {
+  if (!Array.isArray(runners) || runners.length === 0) return []
+  const byBox = new Map()
+  const byName = new Map()
+
+  for (const row of oddsRows || []) {
+    const box = Number(row.box)
+    if (Number.isFinite(box) && !byBox.has(box)) {
+      byBox.set(box, row)
+    }
+
+    const normalizedName = String(row.runnerName || '').trim().toLowerCase()
+    if (normalizedName && !byName.has(normalizedName)) {
+      byName.set(normalizedName, row)
+    }
+  }
+
+  return runners.map(runner => {
+    const box = Number(runner.box ?? runner.barrier)
+    const byBoxMatch = Number.isFinite(box) ? byBox.get(box) : null
+    const byNameMatch = byName.get(String(runner.name || '').trim().toLowerCase())
+    const matched = byBoxMatch || byNameMatch
+
+    if (!matched) return runner
+
+    return {
+      ...runner,
+      odds: Number(matched.decimalOdds),
+      decimalOdds: Number(matched.decimalOdds),
+      oddsSource: 'manual',
+    }
+  })
+}
+
+function buildResearchResponse(savedPrediction, prediction, scrape, aiAnalysis, distance) {
+  const topPick = prediction.picks[0]
+
+  return {
+    predictionId: savedPrediction.id,
+    mode: prediction.mode,
+    oddsAvailable: prediction.oddsAvailable,
+    oddsSource: prediction.oddsSource,
+    picks: prediction.picks,
+    allRunners: prediction.allRunners,
+    allScores: prediction.allRunners,
+    runner: topPick.name,
+    box: topPick.box,
+    barrier: topPick.barrier,
+    distance: Number.isFinite(distance) ? distance : null,
+    odds: topPick.decimalOdds,
+    score: topPick.compositeScore,
+    confidence: topPick.confidence,
+    breakdown: topPick.breakdown,
+    boxBiasSource: topPick.boxBiasSource,
+    reasoning: topPick.summary,
+    sourcesUsed: scrape.sourcesUsed,
+    sourcesSkipped: scrape.sourcesSkipped,
+    warning: scrape.warning,
+    aiAnalysis,
+  }
+}
+
 app.get('/api/health', (req, res) => {
   try {
     db.prepare('SELECT 1').get()
@@ -368,13 +434,14 @@ async function handleResearchRequest(req, res, {
     }))
 
     const prediction = applyMode(enrichedRunners, mode)
+    const topPick = prediction.picks[0]
     const derivedGrade = enrichedRunners.map(runner => runner.grade).find(Boolean) || null
     const aiStartedAt = Date.now()
-    const aiAnalysis = await analyseRaceFn(prediction.allScores, {
+    const aiAnalysis = await analyseRaceFn(prediction.allRunners, {
       date,
       track: meeting,
       raceNumber,
-      distance: Number.isFinite(numericDistance) ? numericDistance : (prediction.runner.distanceMeters ?? null),
+      distance: Number.isFinite(numericDistance) ? numericDistance : (topPick?.runnerData?.distanceMeters ?? null),
       raceType,
       grade: derivedGrade,
     })
@@ -387,11 +454,15 @@ async function handleResearchRequest(req, res, {
       race_type:   raceType,
       race_grade:  derivedGrade,
       race_distance: Number.isFinite(numericDistance) ? numericDistance : null,
-      runner:      prediction.runner.name,
-      box_barrier: prediction.runner.box ?? prediction.runner.barrier ?? null,
+      runner:      topPick.name,
+      box_barrier: topPick.box ?? topPick.barrier ?? null,
       mode,
-      confidence:  prediction.confidence,
-      odds:        prediction.runner.odds ?? null,
+      confidence:  topPick.confidence,
+      odds:        topPick.decimalOdds ?? null,
+      odds_source: topPick.oddsSource ?? null,
+      win_probability: topPick.winProbability ?? null,
+      ev: topPick.ev ?? null,
+      expected_return: topPick.expectedReturn ?? null,
       stake:       stake || 10,
       ai_recommendation: aiAnalysis?.recommendation?.runner ?? null,
       ai_agreed: aiAnalysis?.modelAgreement ?? null,
@@ -423,36 +494,19 @@ async function handleResearchRequest(req, res, {
       track: meeting,
       race_number: raceNumber,
       race_distance: Number.isFinite(numericDistance) ? numericDistance : null,
-      all_runners_json: prediction.allScores,
+      all_runners_json: prediction.allRunners,
       sources_consulted_json: sourcesConsulted,
-      winner_name: prediction.runner.name,
-      winner_box: prediction.runner.box ?? prediction.runner.barrier ?? null,
-      winner_composite_score: prediction.score,
-      winner_breakdown_json: prediction.breakdown,
+      winner_name: topPick.name,
+      winner_box: topPick.box ?? topPick.barrier ?? null,
+      winner_composite_score: topPick.compositeScore,
+      winner_breakdown_json: topPick.breakdown,
       ai_analysis_json: aiAnalysis,
       mode_used: mode,
       box_bias_source: prediction.boxBiasSource,
       raw_data_summary: rawDataSummary,
     })
 
-    res.json({
-      predictionId:   saved.id,
-      runner:         prediction.runner.name,
-      box:            prediction.runner.box,
-      barrier:        prediction.runner.barrier,
-      distance:       Number.isFinite(numericDistance) ? numericDistance : null,
-      odds:           prediction.runner.odds,
-      score:          prediction.score,
-      confidence:     prediction.confidence,
-      breakdown:      prediction.breakdown,
-      boxBiasSource:  prediction.boxBiasSource,
-      reasoning:      prediction.reasoning,
-      allScores:      prediction.allScores,
-      sourcesUsed:    scrape.sourcesUsed,
-      sourcesSkipped: scrape.sourcesSkipped,
-      warning:        scrape.warning,
-      aiAnalysis,
-    })
+    res.json(buildResearchResponse(saved, prediction, scrape, aiAnalysis, numericDistance))
   } catch (err) {
     console.error('[/api/research]', err)
     res.status(500).json({ error: err.message })
@@ -461,6 +515,79 @@ async function handleResearchRequest(req, res, {
 
 // POST /api/research
 app.post('/api/research', handleResearchRequest)
+
+// POST /api/apply-odds
+app.post('/api/apply-odds', (req, res) => {
+  const predictionId = Number(req.body?.predictionId)
+  const oddsRows = Array.isArray(req.body?.odds) ? req.body.odds : null
+
+  if (!Number.isInteger(predictionId) || predictionId < 1) {
+    return res.status(400).json({ error: 'predictionId must be a positive integer' })
+  }
+
+  if (!oddsRows) {
+    return res.status(400).json({ error: 'odds must be an array' })
+  }
+
+  try {
+    const predictionRow = getPrediction(db, predictionId)
+    if (!predictionRow) {
+      return res.status(404).json({ error: 'Prediction not found' })
+    }
+
+    const journalEntry = getJournalEntry(db, predictionId)
+    if (!journalEntry?.all_runners?.length) {
+      return res.status(404).json({ error: 'Cached runner data not found for this prediction' })
+    }
+
+    const updatedRunners = mergeManualOddsIntoRunners(journalEntry.all_runners, oddsRows)
+    const recalculated = applyMode(updatedRunners, predictionRow.mode)
+    const topPick = recalculated.picks[0]
+
+    const updatedPrediction = updatePredictionSelection(db, predictionId, {
+      runner: topPick.name,
+      box_barrier: topPick.box ?? topPick.barrier ?? null,
+      confidence: topPick.confidence,
+      odds: topPick.decimalOdds ?? null,
+      odds_source: topPick.oddsSource ?? null,
+      win_probability: topPick.winProbability ?? null,
+      ev: topPick.ev ?? null,
+      expected_return: topPick.expectedReturn ?? null,
+    })
+
+    updateJournalSelection(db, predictionId, {
+      all_runners_json: recalculated.allRunners,
+      winner_name: topPick.name,
+      winner_box: topPick.box ?? topPick.barrier ?? null,
+      winner_composite_score: topPick.compositeScore,
+      winner_breakdown_json: topPick.breakdown,
+      mode_used: predictionRow.mode,
+    })
+
+    res.json({
+      predictionId,
+      mode: predictionRow.mode,
+      oddsAvailable: recalculated.oddsAvailable,
+      oddsSource: recalculated.oddsSource,
+      picks: recalculated.picks,
+      allRunners: recalculated.allRunners,
+      allScores: recalculated.allRunners,
+      runner: topPick.name,
+      box: topPick.box,
+      barrier: topPick.barrier,
+      odds: topPick.decimalOdds,
+      score: topPick.compositeScore,
+      confidence: topPick.confidence,
+      breakdown: topPick.breakdown,
+      boxBiasSource: topPick.boxBiasSource,
+      reasoning: topPick.summary,
+      updatedPrediction,
+    })
+  } catch (err) {
+    console.error('[/api/apply-odds]', err)
+    res.status(500).json({ error: err.message })
+  }
+})
 
 // GET /api/predictions
 app.get('/api/predictions', (req, res) => {
