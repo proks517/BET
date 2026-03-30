@@ -16,7 +16,6 @@
     "test:scraper": "node --test server/test/scraper.test.js"
   },
   "dependencies": {
-    "@anthropic-ai/sdk": "^0.80.0",
     "better-sqlite3": "^12.8.0",
     "cheerio": "^1.0.0",
     "cors": "^2.8.5",

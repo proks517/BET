@@ -46,13 +46,9 @@ describe('analyseRace', () => {
     }
   })
 
-  test('returns null gracefully when the API call throws', async () => {
+  test('returns null gracefully even when an API key is present', async () => {
     const originalKey = process.env.ANTHROPIC_API_KEY
-    const originalFetch = global.fetch
     process.env.ANTHROPIC_API_KEY = 'test-key'
-    global.fetch = async () => {
-      throw new Error('network down')
-    }
 
     try {
       const result = await analyseRace(sampleRunners, raceContext)
@@ -63,7 +59,6 @@ describe('analyseRace', () => {
       } else {
         process.env.ANTHROPIC_API_KEY = originalKey
       }
-      global.fetch = originalFetch
     }
   })
 })
