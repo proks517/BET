@@ -11,6 +11,13 @@ const {
   getPendingPredictions,
   autoResolveResult,
   getStats,
+  getStatsByTrack,
+  getStatsByGrade,
+  getStatsByBox,
+  getStatsByMonth,
+  getCalibrationData,
+  getStreakData,
+  getProfitCurve,
   getAIAgreementStats,
   logScraperHealth,
   getScraperStats,
@@ -42,6 +49,7 @@ function saveSettledPrediction({
   confidence = 0.7,
   stake = 10,
   race_distance = 320,
+  race_grade = null,
   result = 'win',
   odds = 2.5,
 } = {}) {
@@ -56,6 +64,7 @@ function saveSettledPrediction({
     confidence,
     stake,
     race_distance,
+    race_grade,
   })
 
   return updateResult(db, saved.id, result, result === 'win' ? odds : odds)
@@ -535,6 +544,150 @@ describe('box bias stats', () => {
       { box: 1, total_predictions: 6, win_count: 3, win_rate_pct: 50 },
       { box: 2, total_predictions: 4, win_count: 1, win_rate_pct: 25 },
     ])
+  })
+})
+
+describe('advanced analytics', () => {
+  beforeEach(() => {
+    db.exec('DELETE FROM prediction_journal')
+    db.exec('DELETE FROM predictions')
+  })
+
+  test('getStatsByTrack returns empty array when no predictions exist', () => {
+    assert.deepEqual(getStatsByTrack(db), [])
+  })
+
+  test('getStatsByTrack correctly calculates win rates and pnl for tracks with 3+ predictions', () => {
+    saveSettledPrediction({ track: 'Richmond', race_number: 1, result: 'win', odds: 3.0 })
+    saveSettledPrediction({ track: 'Richmond', race_number: 2, result: 'win', odds: 2.5 })
+    saveSettledPrediction({ track: 'Richmond', race_number: 3, result: 'loss', odds: 4.0 })
+    saveSettledPrediction({ track: 'Albion Park', race_number: 4, result: 'win', odds: 2.0 })
+    saveSettledPrediction({ track: 'Albion Park', race_number: 5, result: 'loss', odds: 3.5 })
+
+    assert.deepEqual(getStatsByTrack(db), [
+      { track: 'Richmond', total: 3, wins: 2, winRate: 66.7, pnl: 25 },
+    ])
+  })
+
+  test('getCalibrationData correctly buckets confidence scores', () => {
+    saveSettledPrediction({ track: 'Track A', race_number: 1, confidence: 0.55, result: 'loss' })
+    saveSettledPrediction({ track: 'Track A', race_number: 2, confidence: 0.65, result: 'win' })
+    saveSettledPrediction({ track: 'Track A', race_number: 3, confidence: 0.74, result: 'win' })
+    saveSettledPrediction({ track: 'Track A', race_number: 4, confidence: 82, result: 'loss' })
+    saveSettledPrediction({ track: 'Track A', race_number: 5, confidence: 91, result: 'win' })
+    saveSettledPrediction({ track: 'Track A', race_number: 6, confidence: 0.4, result: 'win' })
+
+    assert.deepEqual(getCalibrationData(db), [
+      { bucket: '50-59%', predicted: '50-59%', predictedPct: 55, total: 1, wins: 0, actualWinRate: 0 },
+      { bucket: '60-69%', predicted: '60-69%', predictedPct: 65, total: 1, wins: 1, actualWinRate: 100 },
+      { bucket: '70-79%', predicted: '70-79%', predictedPct: 75, total: 1, wins: 1, actualWinRate: 100 },
+      { bucket: '80-89%', predicted: '80-89%', predictedPct: 85, total: 1, wins: 0, actualWinRate: 0 },
+      { bucket: '90%+', predicted: '90%+', predictedPct: 95, total: 1, wins: 1, actualWinRate: 100 },
+    ])
+  })
+
+  test('getStreakData returns zeroed streaks for an empty history', () => {
+    assert.deepEqual(getStreakData(db), {
+      current: 0,
+      longest: 0,
+      currentLoss: 0,
+      longestLoss: 0,
+    })
+  })
+
+  test('getProfitCurve returns predictions in chronological order with running totals', () => {
+    const first = savePrediction(db, {
+      date: '2026-01-05',
+      track: 'Richmond',
+      race_number: 2,
+      race_type: 'greyhound',
+      runner: 'Curve One',
+      box_barrier: 1,
+      mode: 'safest',
+      confidence: 72,
+    })
+    updateResult(db, first.id, 'win', 3.0)
+
+    const second = savePrediction(db, {
+      date: '2026-01-03',
+      track: 'Richmond',
+      race_number: 1,
+      race_type: 'greyhound',
+      runner: 'Curve Two',
+      box_barrier: 2,
+      mode: 'value',
+      confidence: 68,
+    })
+    updateResult(db, second.id, 'loss', 5.0)
+
+    const third = savePrediction(db, {
+      date: '2026-01-06',
+      track: 'Richmond',
+      race_number: 3,
+      race_type: 'greyhound',
+      runner: 'Curve Three',
+      box_barrier: 3,
+      mode: 'longshot',
+      confidence: 85,
+    })
+
+    assert.deepEqual(getProfitCurve(db), [
+      { date: '2026-01-03', runningPnl: -10, runningWinRate: 0 },
+      { date: '2026-01-05', runningPnl: 10, runningWinRate: 50 },
+      { date: '2026-01-06', runningPnl: 10, runningWinRate: 50 },
+    ])
+  })
+
+  test('getStatsByBox handles missing box data gracefully', () => {
+    const first = savePrediction(db, {
+      date: '2026-03-21',
+      track: 'Richmond',
+      race_number: 1,
+      race_type: 'greyhound',
+      runner: 'Inside Rail',
+      box_barrier: 1,
+      mode: 'safest',
+      confidence: 81,
+    })
+    updateResult(db, first.id, 'win', 2.8)
+    saveJournalEntry(db, {
+      prediction_id: first.id,
+      race_date: '2026-03-21',
+      track: 'Richmond',
+      race_number: 1,
+      race_distance: 320,
+      all_runners_json: [],
+      sources_consulted_json: [],
+      winner_name: 'Inside Rail',
+      winner_box: 1,
+      winner_composite_score: 81,
+      winner_breakdown_json: {},
+      ai_analysis_json: null,
+      mode_used: 'safest',
+      box_bias_source: 'default',
+      raw_data_summary: 'test',
+    })
+
+    const boxStats = getStatsByBox(db)
+
+    assert.equal(boxStats.overall.length, 8)
+    assert.deepEqual(boxStats.overall[0], {
+      box: 1,
+      total: 1,
+      wins: 1,
+      winRate: 100,
+      avgCompositeScore: 81,
+    })
+    assert.deepEqual(boxStats.overall[7], {
+      box: 8,
+      total: 0,
+      wins: 0,
+      winRate: 0,
+      avgCompositeScore: null,
+    })
+    assert.equal(boxStats.byTrack.length, 1)
+    assert.equal(boxStats.byTrack[0].track, 'Richmond')
+    assert.equal(boxStats.byTrack[0].boxes[1].total, 0)
   })
 })
 

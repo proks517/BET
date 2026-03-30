@@ -11,6 +11,7 @@ const SCHEMA = `
     track       TEXT NOT NULL,
     race_number INTEGER NOT NULL,
     race_type   TEXT NOT NULL,
+    race_grade  TEXT,
     runner      TEXT NOT NULL,
     box_barrier INTEGER,
     mode        TEXT NOT NULL,
@@ -96,7 +97,16 @@ function parseJournalRow(row) {
 }
 
 function todayDateString() {
-  return new Intl.DateTimeFormat('en-CA', { timeZone: APP_TIMEZONE }).format(new Date())
+  const formatter = new Intl.DateTimeFormat('en-AU', {
+    timeZone: APP_TIMEZONE,
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+  })
+  const parts = Object.fromEntries(
+    formatter.formatToParts(new Date()).map(part => [part.type, part.value])
+  )
+  return `${parts.year}-${parts.month}-${parts.day}`
 }
 
 function normalizeRunnerName(value) {
@@ -117,6 +127,7 @@ function parsePredictionRow(row) {
     stake: row.stake == null ? null : Number(row.stake),
     pnl: row.pnl == null ? null : Number(row.pnl),
     race_distance: row.race_distance == null ? null : Number(row.race_distance),
+    race_grade: row.race_grade ?? null,
     ai_recommendation: row.ai_recommendation ?? null,
     ai_agreed: row.ai_agreed == null ? null : Boolean(Number(row.ai_agreed)),
     resolved_automatically: Boolean(Number(row.resolved_automatically)),
@@ -130,6 +141,7 @@ function initDb() {
   db.pragma('journal_mode = WAL')
   db.exec(SCHEMA)
   ensureColumn(db, 'predictions', 'race_distance', 'INTEGER')
+  ensureColumn(db, 'predictions', 'race_grade', 'TEXT')
   ensureColumn(db, 'predictions', 'ai_recommendation', 'TEXT')
   ensureColumn(db, 'predictions', 'ai_agreed', 'INTEGER')
   ensureColumn(db, 'predictions', 'resolved_automatically', 'INTEGER NOT NULL DEFAULT 0')
@@ -145,6 +157,7 @@ function savePrediction(db, {
   track,
   race_number,
   race_type,
+  race_grade = null,
   runner,
   box_barrier,
   mode,
@@ -156,13 +169,14 @@ function savePrediction(db, {
   ai_agreed = null,
 }) {
   const info = db.prepare(`
-    INSERT INTO predictions (date, track, race_number, race_type, runner, box_barrier, mode, confidence, stake, race_distance, odds, ai_recommendation, ai_agreed)
-    VALUES (@date, @track, @race_number, @race_type, @runner, @box_barrier, @mode, @confidence, @stake, @race_distance, @odds, @ai_recommendation, @ai_agreed)
+    INSERT INTO predictions (date, track, race_number, race_type, race_grade, runner, box_barrier, mode, confidence, stake, race_distance, odds, ai_recommendation, ai_agreed)
+    VALUES (@date, @track, @race_number, @race_type, @race_grade, @runner, @box_barrier, @mode, @confidence, @stake, @race_distance, @odds, @ai_recommendation, @ai_agreed)
   `).run({
     date,
     track,
     race_number,
     race_type,
+    race_grade,
     runner,
     box_barrier,
     mode,
@@ -174,6 +188,58 @@ function savePrediction(db, {
     ai_agreed: ai_agreed == null ? null : (ai_agreed ? 1 : 0),
   })
   return parsePredictionRow(db.prepare('SELECT * FROM predictions WHERE id = ?').get(info.lastInsertRowid))
+}
+
+function roundTo(value, digits = 1) {
+  const factor = 10 ** digits
+  return Math.round((Number(value) || 0) * factor) / factor
+}
+
+function roundCurrency(value) {
+  return roundTo(value, 2)
+}
+
+function calculateWinRate(wins, total) {
+  return total > 0 ? roundTo((wins / total) * 100, 1) : 0
+}
+
+function normalizeConfidenceValue(value) {
+  const numeric = Number(value)
+  if (!Number.isFinite(numeric)) return null
+  return numeric <= 1 ? numeric * 100 : numeric
+}
+
+function comparePredictionsChronologically(left, right) {
+  return String(left.date).localeCompare(String(right.date)) || (left.id - right.id)
+}
+
+function getResolvedPredictions(db) {
+  return db.prepare(`
+    SELECT *
+    FROM predictions
+    WHERE result IS NOT NULL
+      AND result != 'pending'
+  `).all().map(parsePredictionRow)
+}
+
+function getWinLossPredictions(db) {
+  return db.prepare(`
+    SELECT *
+    FROM predictions
+    WHERE result IN ('win', 'loss')
+  `).all().map(parsePredictionRow)
+}
+
+function buildPerformanceSummary(rows, labelKey, labelValue) {
+  const total = rows.length
+  const wins = rows.filter(row => row.result === 'win').length
+  return {
+    [labelKey]: labelValue,
+    total,
+    wins,
+    winRate: calculateWinRate(wins, total),
+    pnl: roundCurrency(rows.reduce((sum, row) => sum + (row.pnl ?? 0), 0)),
+  }
 }
 
 function getPredictions(db, limit = 100) {
@@ -253,12 +319,7 @@ function autoResolveResult(db, predictionId, winner, odds) {
 }
 
 function getStats(db) {
-  const settled = db.prepare(`
-    SELECT *
-    FROM predictions
-    WHERE result IS NOT NULL
-      AND result != 'pending'
-  `).all()
+  const settled = getResolvedPredictions(db)
   const wins = settled.filter(p => p.result === 'win')
   const overall_win_rate = settled.length > 0
     ? Math.round((wins.length / settled.length) * 100)
@@ -267,20 +328,288 @@ function getStats(db) {
   const by_mode = ['safest', 'value', 'longshot'].map(mode => {
     const mp = settled.filter(p => p.mode === mode)
     const mw = mp.filter(p => p.result === 'win')
-    return { mode, total: mp.length, wins: mw.length, win_rate: mp.length > 0 ? Math.round((mw.length / mp.length) * 100) : 0 }
+    return {
+      mode,
+      total: mp.length,
+      wins: mw.length,
+      win_rate: mp.length > 0 ? Math.round((mw.length / mp.length) * 100) : 0,
+      pnl: roundCurrency(mp.reduce((sum, row) => sum + (row.pnl ?? 0), 0)),
+    }
   })
 
   const by_type = ['greyhound', 'horse'].map(race_type => {
     const tp = settled.filter(p => p.race_type === race_type)
     const tw = tp.filter(p => p.result === 'win')
-    return { race_type, total: tp.length, wins: tw.length, win_rate: tp.length > 0 ? Math.round((tw.length / tp.length) * 100) : 0 }
+    return {
+      race_type,
+      total: tp.length,
+      wins: tw.length,
+      win_rate: tp.length > 0 ? Math.round((tw.length / tp.length) * 100) : 0,
+      pnl: roundCurrency(tp.reduce((sum, row) => sum + (row.pnl ?? 0), 0)),
+    }
   })
 
-  const total_pnl = Math.round(settled.reduce((s, p) => s + (p.pnl ?? 0), 0) * 100) / 100
+  const total_pnl = roundCurrency(settled.reduce((s, p) => s + (p.pnl ?? 0), 0))
   const last10 = db.prepare('SELECT * FROM predictions ORDER BY id DESC LIMIT 10').all().map(parsePredictionRow)
   const pending_count = getPendingPredictions(db).length
 
   return { overall_win_rate, by_mode, by_type, total_pnl, last10, pending_count, ai_agreement: getAIAgreementStats(db) }
+}
+
+function getStatsByTrack(db) {
+  const rows = getResolvedPredictions(db)
+  const grouped = new Map()
+
+  for (const row of rows) {
+    if (!grouped.has(row.track)) {
+      grouped.set(row.track, [])
+    }
+    grouped.get(row.track).push(row)
+  }
+
+  return Array.from(grouped.entries())
+    .map(([track, trackRows]) => buildPerformanceSummary(trackRows, 'track', track))
+    .filter(row => row.total >= 3)
+    .sort((left, right) => (
+      right.winRate - left.winRate ||
+      right.total - left.total ||
+      String(left.track).localeCompare(String(right.track))
+    ))
+}
+
+function getStatsByGrade(db) {
+  const rows = getResolvedPredictions(db).filter(row => row.race_grade)
+  const grouped = new Map()
+
+  for (const row of rows) {
+    if (!grouped.has(row.race_grade)) {
+      grouped.set(row.race_grade, [])
+    }
+    grouped.get(row.race_grade).push(row)
+  }
+
+  return Array.from(grouped.entries())
+    .map(([race_grade, gradeRows]) => buildPerformanceSummary(gradeRows, 'race_grade', race_grade))
+    .filter(row => row.total >= 3)
+    .sort((left, right) => (
+      right.winRate - left.winRate ||
+      right.total - left.total ||
+      String(left.race_grade).localeCompare(String(right.race_grade))
+    ))
+}
+
+function buildBoxPerformanceRows(rows, scoreMap) {
+  const grouped = new Map(
+    Array.from({ length: 8 }, (_, index) => [
+      index + 1,
+      { total: 0, wins: 0, scores: [] },
+    ])
+  )
+
+  for (const row of rows) {
+    const box = Number(row.box_barrier)
+    if (!Number.isFinite(box) || box < 1 || box > 8) continue
+
+    const entry = grouped.get(box)
+    entry.total += 1
+    if (row.result === 'win') {
+      entry.wins += 1
+    }
+
+    const compositeScore = scoreMap.get(row.id)
+    if (Number.isFinite(compositeScore)) {
+      entry.scores.push(compositeScore)
+    }
+  }
+
+  return Array.from(grouped.entries()).map(([box, entry]) => ({
+    box,
+    total: entry.total,
+    wins: entry.wins,
+    winRate: calculateWinRate(entry.wins, entry.total),
+    avgCompositeScore: entry.scores.length > 0
+      ? roundTo(entry.scores.reduce((sum, score) => sum + score, 0) / entry.scores.length, 1)
+      : null,
+  }))
+}
+
+function getStatsByBox(db) {
+  const rows = getWinLossPredictions(db).filter(row => {
+    const box = Number(row.box_barrier)
+    return Number.isFinite(box) && box >= 1 && box <= 8
+  })
+
+  const journalRows = db.prepare(`
+    SELECT prediction_id, winner_composite_score
+    FROM prediction_journal
+    ORDER BY id DESC
+  `).all()
+
+  const scoreMap = new Map()
+  for (const row of journalRows) {
+    if (!scoreMap.has(row.prediction_id)) {
+      scoreMap.set(row.prediction_id, Number(row.winner_composite_score))
+    }
+  }
+
+  const byTrackMap = new Map()
+  for (const row of rows) {
+    if (!byTrackMap.has(row.track)) {
+      byTrackMap.set(row.track, [])
+    }
+    byTrackMap.get(row.track).push(row)
+  }
+
+  return {
+    overall: buildBoxPerformanceRows(rows, scoreMap),
+    byTrack: Array.from(byTrackMap.entries())
+      .map(([track, trackRows]) => ({
+        track,
+        total: trackRows.length,
+        boxes: buildBoxPerformanceRows(trackRows, scoreMap),
+      }))
+      .sort((left, right) => String(left.track).localeCompare(String(right.track))),
+  }
+}
+
+function getLastTwelveMonthKeys() {
+  const [year, month] = todayDateString().slice(0, 7).split('-').map(Number)
+  return Array.from({ length: 12 }, (_, index) => {
+    const cursor = new Date(Date.UTC(year, (month - 1) - (11 - index), 1))
+    const cursorYear = cursor.getUTCFullYear()
+    const cursorMonth = String(cursor.getUTCMonth() + 1).padStart(2, '0')
+    return `${cursorYear}-${cursorMonth}`
+  })
+}
+
+function getStatsByMonth(db) {
+  const rows = getResolvedPredictions(db)
+  const months = getLastTwelveMonthKeys()
+  const grouped = new Map(months.map(month => [month, { month, total: 0, wins: 0, pnl: 0 }]))
+
+  for (const row of rows) {
+    const monthKey = String(row.date || '').slice(0, 7)
+    if (!grouped.has(monthKey)) continue
+
+    const entry = grouped.get(monthKey)
+    entry.total += 1
+    if (row.result === 'win') {
+      entry.wins += 1
+    }
+    entry.pnl += row.pnl ?? 0
+  }
+
+  return months.map(month => {
+    const entry = grouped.get(month)
+    return {
+      month,
+      total: entry.total,
+      wins: entry.wins,
+      winRate: calculateWinRate(entry.wins, entry.total),
+      pnl: roundCurrency(entry.pnl),
+    }
+  })
+}
+
+function getCalibrationData(db) {
+  const buckets = [
+    { bucket: '50-59%', min: 50, max: 59, predictedPct: 55 },
+    { bucket: '60-69%', min: 60, max: 69, predictedPct: 65 },
+    { bucket: '70-79%', min: 70, max: 79, predictedPct: 75 },
+    { bucket: '80-89%', min: 80, max: 89, predictedPct: 85 },
+    { bucket: '90%+', min: 90, max: Infinity, predictedPct: 95 },
+  ].map(bucket => ({ ...bucket, total: 0, wins: 0 }))
+
+  for (const row of getWinLossPredictions(db)) {
+    const confidence = normalizeConfidenceValue(row.confidence)
+    if (!Number.isFinite(confidence) || confidence < 50) continue
+
+    const bucket = buckets.find(entry => confidence >= entry.min && confidence <= entry.max)
+    if (!bucket) continue
+
+    bucket.total += 1
+    if (row.result === 'win') {
+      bucket.wins += 1
+    }
+  }
+
+  return buckets.map(bucket => ({
+    bucket: bucket.bucket,
+    predicted: bucket.bucket,
+    predictedPct: bucket.predictedPct,
+    total: bucket.total,
+    wins: bucket.wins,
+    actualWinRate: calculateWinRate(bucket.wins, bucket.total),
+  }))
+}
+
+function getStreakData(db) {
+  const rows = getWinLossPredictions(db).sort(comparePredictionsChronologically)
+  if (rows.length === 0) {
+    return { current: 0, longest: 0, currentLoss: 0, longestLoss: 0 }
+  }
+
+  let longest = 0
+  let longestLoss = 0
+  let winRun = 0
+  let lossRun = 0
+
+  for (const row of rows) {
+    if (row.result === 'win') {
+      winRun += 1
+      lossRun = 0
+      longest = Math.max(longest, winRun)
+    } else if (row.result === 'loss') {
+      lossRun += 1
+      winRun = 0
+      longestLoss = Math.max(longestLoss, lossRun)
+    }
+  }
+
+  const descending = [...rows].sort((left, right) => comparePredictionsChronologically(right, left))
+  const latestResult = descending[0]?.result
+  let current = 0
+  let currentLoss = 0
+
+  for (const row of descending) {
+    if (row.result !== latestResult) break
+    if (latestResult === 'win') {
+      current += 1
+    } else if (latestResult === 'loss') {
+      currentLoss += 1
+    }
+  }
+
+  return { current, longest, currentLoss, longestLoss }
+}
+
+function getProfitCurve(db) {
+  const rows = db.prepare(`
+    SELECT *
+    FROM predictions
+    ORDER BY date ASC, id ASC
+  `).all().map(parsePredictionRow)
+
+  let runningPnl = 0
+  let settledCount = 0
+  let winCount = 0
+
+  return rows.map(row => {
+    runningPnl += row.pnl ?? 0
+
+    if (row.result === 'win') {
+      settledCount += 1
+      winCount += 1
+    } else if (row.result === 'loss') {
+      settledCount += 1
+    }
+
+    return {
+      date: row.date,
+      runningPnl: roundCurrency(runningPnl),
+      runningWinRate: settledCount > 0 ? calculateWinRate(winCount, settledCount) : 0,
+    }
+  })
 }
 
 function getAIAgreementStats(db) {
@@ -502,6 +831,13 @@ module.exports = {
   getPendingPredictions,
   autoResolveResult,
   getStats,
+  getStatsByTrack,
+  getStatsByGrade,
+  getStatsByBox,
+  getStatsByMonth,
+  getCalibrationData,
+  getStreakData,
+  getProfitCurve,
   getAIAgreementStats,
   logScraperHealth,
   getScraperStats,

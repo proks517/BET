@@ -733,6 +733,7 @@ select:focus {
 .field-table,
 .predictions-table,
 .health-table,
+.monthly-table,
 .journal-field-table {
   width: 100%;
   border-collapse: collapse;
@@ -745,6 +746,8 @@ select:focus {
 .predictions-table td,
 .health-table th,
 .health-table td,
+.monthly-table th,
+.monthly-table td,
 .journal-field-table th,
 .journal-field-table td {
   padding: 12px 14px;
@@ -755,6 +758,7 @@ select:focus {
 .field-table th,
 .predictions-table th,
 .health-table th,
+.monthly-table th,
 .journal-field-table th {
   font-size: 0.76rem;
   letter-spacing: 0.08em;
@@ -883,7 +887,9 @@ select:focus {
 .pnl-cell.negative { color: var(--accent-red); }
 
 .stat-number.good { color: var(--accent-green); }
+.stat-number.warn { color: var(--accent-amber); }
 .stat-number.bad { color: var(--accent-red); }
+.stat-number.neutral { color: var(--text-secondary); }
 
 .overview-grid {
   grid-template-columns: repeat(3, minmax(0, 1fr));
@@ -1053,6 +1059,317 @@ select:focus {
   line-height: 1.6;
 }
 
+.analytics-toolbar-card,
+.analytics-toolbar-actions,
+.advanced-overview-stack,
+.track-performance-list,
+.track-performance-row,
+.track-performance-meta,
+.mode-performance-grid,
+.mode-performance-card,
+.box-performance-grid,
+.box-performance-card,
+.calibration-stack,
+.calibration-row,
+.calibration-meta,
+.calibration-values,
+.profit-curve-wrap,
+.profit-curve-meta,
+.advanced-result-strip {
+  display: flex;
+  gap: 14px;
+}
+
+.analytics-toolbar-card,
+.track-performance-row,
+.calibration-row {
+  justify-content: space-between;
+  align-items: center;
+}
+
+.analytics-toolbar-actions,
+.profit-curve-meta {
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: flex-end;
+}
+
+.advanced-overview-stack,
+.track-performance-list,
+.track-performance-meta,
+.mode-performance-card,
+.box-performance-card,
+.calibration-stack,
+.calibration-meta,
+.calibration-values,
+.profit-curve-wrap {
+  flex-direction: column;
+}
+
+.advanced-overview-stack {
+  gap: 18px;
+}
+
+.analytics-toolbar-actions .panel-button {
+  min-width: 190px;
+}
+
+.advanced-result-strip {
+  flex-wrap: wrap;
+}
+
+.result-letter-tile {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 40px;
+  height: 40px;
+  border-radius: 12px;
+  font-family: var(--font-mono);
+  font-weight: 800;
+  border: 1px solid rgba(30, 58, 95, 0.45);
+}
+
+.result-letter-tile.win {
+  background: rgba(16, 185, 129, 0.18);
+  border-color: rgba(16, 185, 129, 0.45);
+  color: #86efac;
+}
+
+.result-letter-tile.loss {
+  background: rgba(239, 68, 68, 0.16);
+  border-color: rgba(239, 68, 68, 0.45);
+  color: #fca5a5;
+}
+
+.result-letter-tile.pending,
+.result-letter-tile.scratched {
+  background: rgba(100, 116, 139, 0.18);
+  border-color: rgba(100, 116, 139, 0.35);
+  color: #cbd5e1;
+}
+
+.mode-performance-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.mode-performance-card {
+  padding: 18px;
+  border-radius: var(--radius);
+  border: 1px solid rgba(30, 58, 95, 0.55);
+  background: rgba(10, 16, 28, 0.84);
+}
+
+.mode-performance-card strong {
+  font-family: var(--font-mono);
+  font-size: 1.75rem;
+}
+
+.mode-performance-card.good {
+  border-color: rgba(16, 185, 129, 0.4);
+}
+
+.mode-performance-card.good strong,
+.track-performance-value.good,
+.monthly-table td.good,
+.box-performance-card.good strong {
+  color: var(--accent-green);
+}
+
+.mode-performance-card.warn {
+  border-color: rgba(245, 158, 11, 0.38);
+}
+
+.mode-performance-card.warn strong,
+.track-performance-value.warn,
+.monthly-table td.warn,
+.box-performance-card.warn strong {
+  color: var(--accent-amber);
+}
+
+.mode-performance-card.bad {
+  border-color: rgba(239, 68, 68, 0.34);
+}
+
+.mode-performance-card.bad strong,
+.track-performance-value.bad,
+.monthly-table td.bad,
+.box-performance-card.bad strong {
+  color: var(--accent-red);
+}
+
+.track-performance-row {
+  gap: 18px;
+}
+
+.track-performance-meta {
+  min-width: 180px;
+  gap: 4px;
+}
+
+.track-performance-meta span {
+  color: var(--text-secondary);
+  font-size: 0.85rem;
+}
+
+.track-performance-bar-shell {
+  position: relative;
+  flex: 1;
+  min-height: 14px;
+  border-radius: 999px;
+  background: rgba(15, 23, 42, 0.92);
+  overflow: hidden;
+}
+
+.track-performance-bar {
+  height: 100%;
+  border-radius: inherit;
+}
+
+.track-performance-bar.good {
+  background: linear-gradient(90deg, rgba(16, 185, 129, 0.42), var(--accent-green));
+}
+
+.track-performance-bar.warn {
+  background: linear-gradient(90deg, rgba(245, 158, 11, 0.42), var(--accent-amber));
+}
+
+.track-performance-bar.bad {
+  background: linear-gradient(90deg, rgba(239, 68, 68, 0.42), var(--accent-red));
+}
+
+.track-performance-value {
+  min-width: 68px;
+  text-align: right;
+  font-family: var(--font-mono);
+  font-weight: 700;
+}
+
+.box-performance-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+}
+
+.box-performance-card {
+  padding: 16px;
+  border-radius: var(--radius);
+  border: 1px solid rgba(30, 58, 95, 0.45);
+  background: rgba(10, 16, 28, 0.82);
+}
+
+.box-performance-card span:last-child {
+  color: var(--text-secondary);
+  font-size: 0.84rem;
+}
+
+.monthly-table tfoot tr {
+  background: rgba(240, 180, 41, 0.08);
+}
+
+.monthly-table tfoot td {
+  font-weight: 700;
+}
+
+.monthly-table tr.current-month {
+  background: rgba(59, 130, 246, 0.08);
+}
+
+.calibration-card .dashboard-copy {
+  margin-bottom: 8px;
+}
+
+.calibration-row {
+  display: grid;
+  grid-template-columns: minmax(110px, 0.9fr) minmax(0, 3fr) minmax(120px, 1fr);
+  gap: 18px;
+}
+
+.calibration-meta span,
+.calibration-values span {
+  color: var(--text-secondary);
+  font-size: 0.84rem;
+}
+
+.calibration-values {
+  align-items: flex-end;
+  gap: 4px;
+}
+
+.calibration-track {
+  position: relative;
+  min-height: 18px;
+  border-radius: 999px;
+  background: rgba(8, 13, 24, 0.94);
+  overflow: hidden;
+}
+
+.calibration-bar {
+  position: absolute;
+  inset: 0 auto 0 0;
+  height: 100%;
+  border-radius: 999px;
+}
+
+.calibration-bar.predicted {
+  background: rgba(59, 130, 246, 0.28);
+}
+
+.calibration-bar.actual.good {
+  background: linear-gradient(90deg, rgba(16, 185, 129, 0.42), var(--accent-green));
+}
+
+.calibration-bar.actual.bad {
+  background: linear-gradient(90deg, rgba(239, 68, 68, 0.44), var(--accent-red));
+}
+
+.calibration-bar.actual.neutral {
+  background: rgba(148, 163, 184, 0.45);
+}
+
+.profit-curve-wrap {
+  gap: 16px;
+}
+
+.profit-curve-chart {
+  width: 100%;
+  height: 260px;
+  overflow: visible;
+}
+
+.profit-baseline {
+  stroke: rgba(148, 163, 184, 0.45);
+  stroke-width: 1;
+  stroke-dasharray: 5 5;
+}
+
+.profit-line {
+  fill: none;
+  stroke-width: 3.5;
+  stroke-linejoin: round;
+  stroke-linecap: round;
+}
+
+.profit-line.positive {
+  stroke: var(--accent-green);
+}
+
+.profit-line.negative {
+  stroke: var(--accent-red);
+}
+
+.profit-point {
+  fill: var(--accent-gold);
+  stroke: rgba(10, 16, 28, 0.95);
+  stroke-width: 2;
+}
+
+.profit-curve-meta {
+  justify-content: space-between;
+  color: var(--text-secondary);
+  font-family: var(--font-mono);
+}
+
 .pending-pill.active {
   border-color: rgba(240, 180, 41, 0.45);
   color: var(--accent-gold);
@@ -1191,7 +1508,8 @@ select:focus {
 
 @media (max-width: 1100px) {
   .stats-hero-grid,
-  .overview-grid {
+  .overview-grid,
+  .box-performance-grid {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 }
@@ -1220,8 +1538,28 @@ select:focus {
   .stats-hero-grid,
   .overview-grid,
   .mode-mini-grid,
+  .mode-performance-grid,
+  .box-performance-grid,
   .best-bets-grid,
   .ai-performance-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .analytics-toolbar-card,
+  .analytics-toolbar-actions,
+  .track-performance-row {
+    flex-direction: column;
+    align-items: flex-start;
+  }
+
+  .track-performance-meta,
+  .track-performance-value {
+    min-width: 0;
+    width: 100%;
+    text-align: left;
+  }
+
+  .calibration-row {
     grid-template-columns: 1fr;
   }
 
@@ -1264,6 +1602,15 @@ select:focus {
 
   .trackside-mode .record-actions .result-btn {
     flex: 1 1 100%;
+  }
+
+  .result-letter-tile {
+    width: 36px;
+    height: 36px;
+  }
+
+  .profit-curve-chart {
+    height: 220px;
   }
 }
 

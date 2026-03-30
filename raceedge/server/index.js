@@ -9,6 +9,13 @@ const {
   getPendingPredictions,
   autoResolveResult,
   getStats,
+  getStatsByTrack,
+  getStatsByGrade,
+  getStatsByBox,
+  getStatsByMonth,
+  getCalibrationData,
+  getStreakData,
+  getProfitCurve,
   getScraperStats,
   getBoxBiasStats,
   saveJournalEntry,
@@ -378,6 +385,7 @@ async function handleResearchRequest(req, res, {
       track:       meeting,
       race_number: raceNumber,
       race_type:   raceType,
+      race_grade:  derivedGrade,
       race_distance: Number.isFinite(numericDistance) ? numericDistance : null,
       runner:      prediction.runner.name,
       box_barrier: prediction.runner.box ?? prediction.runner.barrier ?? null,
@@ -574,6 +582,23 @@ app.patch('/api/predictions/:id', (req, res) => {
 app.get('/api/stats', (req, res) => {
   try {
     res.json(getStats(db))
+  } catch (err) {
+    res.status(500).json({ error: err.message })
+  }
+})
+
+// GET /api/stats/advanced
+app.get('/api/stats/advanced', (req, res) => {
+  try {
+    res.json({
+      byTrack: getStatsByTrack(db),
+      byGrade: getStatsByGrade(db),
+      byBox: getStatsByBox(db),
+      byMonth: getStatsByMonth(db),
+      calibration: getCalibrationData(db),
+      streaks: getStreakData(db),
+      profitCurve: getProfitCurve(db),
+    })
   } catch (err) {
     res.status(500).json({ error: err.message })
   }

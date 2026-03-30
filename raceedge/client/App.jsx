@@ -43,6 +43,15 @@ const MODE_CARDS = [
   { key: 'longshot', label: 'LONGSHOT', icon: '⚡', accent: 'red' },
 ]
 const RACE_NUMBERS = Array.from({ length: 12 }, (_, index) => index + 1)
+const DEFAULT_ADVANCED_STATS = {
+  byTrack: [],
+  byGrade: [],
+  byBox: { overall: [], byTrack: [] },
+  byMonth: [],
+  calibration: [],
+  streaks: { current: 0, longest: 0, currentLoss: 0, longestLoss: 0 },
+  profitCurve: [],
+}
 
 function todayStr() {
   return new Date().toLocaleDateString('en-CA') // YYYY-MM-DD in local time
@@ -116,6 +125,47 @@ function formatModeLabel(mode) {
 
 function formatPredictionResult(result) {
   return result || 'pending'
+}
+
+function formatSignedCurrency(value) {
+  const amount = Number(value) || 0
+  return `${amount >= 0 ? '+' : '-'}$${Math.abs(amount).toFixed(2)}`
+}
+
+function getHeroWinRateTone(winRate) {
+  if (winRate > 35) return 'good'
+  if (winRate >= 20) return 'warn'
+  return 'bad'
+}
+
+function getAnalyticsWinRateTone(winRate) {
+  if (winRate > 40) return 'good'
+  if (winRate >= 20) return 'warn'
+  return 'bad'
+}
+
+function formatMonthLabel(monthKey) {
+  if (!monthKey || !monthKey.includes('-')) return monthKey || '—'
+  const [year, month] = monthKey.split('-').map(Number)
+  const parsed = new Date(Date.UTC(year, (month || 1) - 1, 1))
+  return parsed.toLocaleString('en-AU', { month: 'short', year: 'numeric', timeZone: 'UTC' })
+}
+
+function getStreakDisplay(streaks) {
+  if (streaks?.current > 0) {
+    return { label: `W${streaks.current}`, tone: 'good' }
+  }
+
+  if (streaks?.currentLoss > 0) {
+    return { label: `L${streaks.currentLoss}`, tone: 'bad' }
+  }
+
+  return { label: '—', tone: 'neutral' }
+}
+
+function getCalibrationTone(actualWinRate, predictedPct, total) {
+  if (!total) return 'neutral'
+  return actualWinRate >= predictedPct ? 'good' : 'bad'
 }
 
 function mergeScraperHealthRows(rows = []) {
@@ -216,6 +266,7 @@ function App() {
 
   // Stats
   const [stats,      setStats]      = useState(null)
+  const [advancedStats, setAdvancedStats] = useState(DEFAULT_ADVANCED_STATS)
   const [predictions, setPredictions] = useState([])
   const [predictionSort, setPredictionSort] = useState({ key: 'date', direction: 'desc' })
   const [scraperHealth, setScraperHealth] = useState(() => mergeScraperHealthRows())
@@ -242,6 +293,24 @@ function App() {
 
   const loadStats = useCallback(() => {
     fetch('/api/stats').then(r => r.json()).then(setStats).catch(() => {})
+  }, [])
+
+  const loadAdvancedStats = useCallback(() => {
+    fetch('/api/stats/advanced')
+      .then(r => r.json())
+      .then(data => setAdvancedStats({
+        ...DEFAULT_ADVANCED_STATS,
+        ...data,
+        byBox: {
+          ...DEFAULT_ADVANCED_STATS.byBox,
+          ...(data?.byBox || {}),
+        },
+        streaks: {
+          ...DEFAULT_ADVANCED_STATS.streaks,
+          ...(data?.streaks || {}),
+        },
+      }))
+      .catch(() => {})
   }, [])
 
   const loadPredictions = useCallback(() => {
@@ -299,11 +368,12 @@ function App() {
 
   useEffect(() => {
     loadStats()
+    loadAdvancedStats()
     loadPredictions()
     loadScraperHealth()
     loadPending()
     loadJournal()
-  }, [loadStats, loadPredictions, loadScraperHealth, loadPending, loadJournal])
+  }, [loadStats, loadAdvancedStats, loadPredictions, loadScraperHealth, loadPending, loadJournal])
 
   useEffect(() => {
     if (!error) return
@@ -434,6 +504,7 @@ function App() {
       setActiveSourceIdx(-1)
       setAiAnalysisPending(false)
       loadStats()
+      loadAdvancedStats()
       loadPredictions()
       loadScraperHealth()
       loadPending()
@@ -455,6 +526,7 @@ function App() {
       if (!res.ok) throw new Error('Failed to record result')
       setRecorded(true)
       loadStats()
+      loadAdvancedStats()
       loadPredictions()
       loadPending()
     } catch (e) {
@@ -478,6 +550,7 @@ function App() {
       })
 
       loadStats()
+      loadAdvancedStats()
       loadPredictions()
       loadPending()
     } catch (e) {
@@ -635,16 +708,48 @@ function App() {
     }))
   }
 
-  const streak = computeCurrentStreak(predictions)
+  const overviewStreak = getStreakDisplay(advancedStats.streaks)
   const sortedPredictions = sortPredictions(predictions, predictionSort)
-  const recentResultSquares = [...predictions].sort((left, right) => right.id - left.id).slice(0, 10)
+  const recentResultSquares = [...predictions].sort((left, right) => right.id - left.id).slice(0, 20)
   const modePerformance = ['safest', 'value', 'longshot'].map(modeKey => (
-    stats?.by_mode?.find(row => row.mode === modeKey) || { mode: modeKey, total: 0, wins: 0, win_rate: 0 }
+    stats?.by_mode?.find(row => row.mode === modeKey) || { mode: modeKey, total: 0, wins: 0, win_rate: 0, pnl: 0 }
   ))
   const aiStats = stats?.ai_agreement || { totalWithAI: 0, agreedCount: 0, agreedWinRate: 0, disagreedWinRate: 0 }
   const aiAgreementRate = aiStats.totalWithAI > 0
     ? Math.round((aiStats.agreedCount / aiStats.totalWithAI) * 100)
     : 0
+  const advancedByTrack = advancedStats.byTrack || []
+  const advancedByBox = advancedStats.byBox?.overall || []
+  const advancedByMonth = advancedStats.byMonth || []
+  const calibrationRows = advancedStats.calibration || []
+  const profitCurve = advancedStats.profitCurve || []
+  const monthTotals = advancedByMonth.reduce((totals, row) => ({
+    total: totals.total + (row.total || 0),
+    wins: totals.wins + (row.wins || 0),
+    pnl: totals.pnl + (row.pnl || 0),
+  }), { total: 0, wins: 0, pnl: 0 })
+  const monthTotalsWinRate = monthTotals.total > 0
+    ? Math.round((monthTotals.wins / monthTotals.total) * 1000) / 10
+    : 0
+  const currentMonthKey = todayStr().slice(0, 7)
+  const profitChartWidth = 560
+  const profitChartHeight = 240
+  const profitChartPadding = 18
+  const profitMinPnl = Math.min(0, ...profitCurve.map(point => Number(point.runningPnl) || 0))
+  const profitMaxPnl = Math.max(0, ...profitCurve.map(point => Number(point.runningPnl) || 0))
+  const profitRange = Math.max(1, profitMaxPnl - profitMinPnl)
+  const profitX = index => (
+    profitCurve.length <= 1
+      ? profitChartWidth / 2
+      : profitChartPadding + ((profitChartWidth - (profitChartPadding * 2)) * index) / (profitCurve.length - 1)
+  )
+  const profitY = value => (
+    profitChartPadding + ((profitMaxPnl - value) / profitRange) * (profitChartHeight - (profitChartPadding * 2))
+  )
+  const profitPoints = profitCurve
+    .map((point, index) => `${profitX(index)},${profitY(Number(point.runningPnl) || 0)}`)
+    .join(' ')
+  const zeroLineY = profitY(0)
   const boxBiasRows = Array.from({ length: 8 }, (_, index) => {
     const box = index + 1
     return boxBiasData.boxes?.find(entry => Number(entry.box) === box) || {
@@ -1187,106 +1292,271 @@ function App() {
 
                 {dashboardTab === 'overview' && (
                   <>
+                    <section className="dashboard-card analytics-toolbar-card">
+                      <div>
+                        <div className="section-title">Advanced Overview</div>
+                        <div className="dashboard-copy">Track splits, calibration, streaks, monthly form, and profitability in one racing board.</div>
+                      </div>
+                      <div className="analytics-toolbar-actions">
+                        <span className={`pending-pill ${pendingPredictions.length > 0 ? 'active' : ''}`}>Pending {pendingPredictions.length}</span>
+                        <button className={`panel-button ${checkingResults ? 'loading' : ''}`} onClick={handleCheckResults} disabled={checkingResults}>
+                          <span className={checkingResults ? 'button-spinner' : ''} />
+                          <span>{checkingResults ? 'CHECKING RESULTS...' : 'CHECK RESULTS'}</span>
+                        </button>
+                      </div>
+                    </section>
+
                     <div className="stats-hero-grid">
                       <article className="stat-tile">
-                        <span className="stat-heading">Win Rate</span>
-                        <strong className="stat-number">{stats.overall_win_rate}%</strong>
-                        <span className="stat-subtext">Across all settled predictions</span>
+                        <span className="stat-heading">Overall Win Rate</span>
+                        <strong className={`stat-number ${getHeroWinRateTone(stats?.overall_win_rate ?? 0)}`}>{stats?.overall_win_rate ?? 0}%</strong>
+                        <span className="stat-subtext">Settled predictions across the ledger</span>
                       </article>
 
                       <article className="stat-tile">
-                        <span className="stat-heading">P&amp;L</span>
-                        <strong className={`stat-number ${stats.total_pnl >= 0 ? 'positive' : 'negative'}`}>
-                          {stats.total_pnl >= 0 ? '+' : ''}${stats.total_pnl.toFixed(2)}
+                        <span className="stat-heading">Total P&amp;L</span>
+                        <strong className={`stat-number ${(stats?.total_pnl ?? 0) >= 0 ? 'positive' : 'negative'}`}>
+                          {formatSignedCurrency(stats?.total_pnl ?? 0)}
                         </strong>
-                        <span className="stat-subtext">Realised profit and loss</span>
+                        <span className="stat-subtext">Realised result after all updates</span>
                       </article>
 
                       <article className="stat-tile">
                         <span className="stat-heading">Predictions Made</span>
                         <strong className="stat-number">{predictions.length}</strong>
-                        <span className="stat-subtext">Recorded in the ledger</span>
+                        <span className="stat-subtext">Stored selections and follow-up outcomes</span>
                       </article>
 
                       <article className="stat-tile">
                         <span className="stat-heading">Current Streak</span>
-                        <strong className={`stat-number ${streak.tone}`}>{streak.label}</strong>
-                        <span className="stat-subtext">Latest settled sequence</span>
+                        <strong className={`stat-number ${overviewStreak.tone}`}>{overviewStreak.label}</strong>
+                        <span className="stat-subtext">
+                          Best ever W{advancedStats.streaks.longest} / L{advancedStats.streaks.longestLoss}
+                        </span>
                       </article>
                     </div>
 
-                    <div className="overview-grid">
+                    <div className="advanced-overview-stack">
                       <section className="dashboard-card">
-                        <div className="section-title">Win Rate By Mode</div>
-                        <div className="mode-mini-grid">
-                          {modePerformance.map(modeRow => (
-                            <div className={`mode-mini-card ${modeRow.mode}`} key={modeRow.mode}>
-                              <span className="mode-mini-title">{formatModeLabel(modeRow.mode)}</span>
-                              <strong>{modeRow.win_rate}%</strong>
-                              <span>{modeRow.wins}/{modeRow.total} wins</span>
-                            </div>
-                          ))}
-                        </div>
-                      </section>
-
-                      <section className="dashboard-card">
-                        <div className="section-title">Recent Form</div>
-                        <div className="recent-form-strip">
+                        <div className="section-title">Recent Form Strip</div>
+                        <div className="dashboard-copy">Last 20 outcomes at a glance. Hover any tile for the race date and result.</div>
+                        <div className="advanced-result-strip">
                           {recentResultSquares.length > 0 ? recentResultSquares.map(prediction => {
                             const status = formatPredictionResult(prediction.result)
+                            const letter = status === 'win' ? 'W' : status === 'loss' ? 'L' : 'P'
                             return (
                               <span
                                 key={prediction.id}
-                                className={`result-square ${getResultTone(status)}`}
+                                className={`result-letter-tile ${status}`}
                                 title={`${prediction.date} · ${prediction.track} R${prediction.race_number} · ${status}`}
-                              />
+                              >
+                                {letter}
+                              </span>
                             )
                           }) : (
                             <div className="empty-state-card">No prediction history yet.</div>
                           )}
                         </div>
-                        {recentResultSquares.length > 0 && (
-                          <div className="micro-note">Last 10 results: green win, red loss, grey pending or scratched.</div>
+                      </section>
+
+                      <section className="dashboard-card">
+                        <div className="section-title">Performance By Mode</div>
+                        <div className="mode-performance-grid">
+                          {modePerformance.map(modeRow => (
+                            <article className={`mode-performance-card ${getHeroWinRateTone(modeRow.win_rate)} ${modeRow.mode}`} key={modeRow.mode}>
+                              <span className="mode-mini-title">{formatModeLabel(modeRow.mode)}</span>
+                              <strong>{modeRow.win_rate}%</strong>
+                              <span>{modeRow.total} bets</span>
+                              <span>{formatSignedCurrency(modeRow.pnl || 0)}</span>
+                            </article>
+                          ))}
+                        </div>
+                      </section>
+
+                      <section className="dashboard-card">
+                        <div className="section-title">Win Rate By Track</div>
+                        <div className="dashboard-copy">Tracks with at least three recorded predictions are ranked by strike rate.</div>
+                        {advancedByTrack.length > 0 ? (
+                          <div className="track-performance-list">
+                            {advancedByTrack.map(row => {
+                              const tone = getAnalyticsWinRateTone(row.winRate)
+                              return (
+                                <div className="track-performance-row" key={row.track}>
+                                  <div className="track-performance-meta">
+                                    <strong>{row.track}</strong>
+                                    <span>{row.total} predictions</span>
+                                  </div>
+                                  <div className="track-performance-bar-shell">
+                                    <div className={`track-performance-bar ${tone}`} style={{ width: `${Math.max(4, row.winRate)}%` }} />
+                                  </div>
+                                  <div className={`track-performance-value ${tone}`}>{row.winRate}%</div>
+                                </div>
+                              )
+                            })}
+                          </div>
+                        ) : (
+                          <div className="empty-state-card">Track splits unlock after three settled predictions at a venue.</div>
                         )}
                       </section>
 
-                      <section className="dashboard-card result-check-card">
-                        <div className="section-title">Result Checker</div>
-                        <p className="dashboard-copy">Past unresolved predictions can be checked now, and the server will also re-check every 30 minutes while it is running.</p>
-                        <div className="result-check-row">
-                          <span className={`pending-pill ${pendingPredictions.length > 0 ? 'active' : ''}`}>Pending {pendingPredictions.length}</span>
-                          <span className="micro-note">Automatic polling enabled</span>
+                      <section className="dashboard-card">
+                        <div className="section-title">Win Rate By Box Number</div>
+                        <div className="box-performance-grid">
+                          {(advancedByBox.length > 0 ? advancedByBox : Array.from({ length: 8 }, (_, index) => ({
+                            box: index + 1,
+                            total: 0,
+                            wins: 0,
+                            winRate: 0,
+                            avgCompositeScore: null,
+                          }))).map(row => {
+                            const tone = getAnalyticsWinRateTone(row.winRate)
+                            return (
+                              <article className={`box-performance-card ${tone}`} key={`overview-box-${row.box}`}>
+                                <span className={`box-pill ${getBoxBadgeClass(row.box)}`}>Box {row.box}</span>
+                                <strong>{row.winRate}%</strong>
+                                <span>{row.total} samples</span>
+                                <span>{row.avgCompositeScore != null ? `Avg score ${row.avgCompositeScore}` : 'No score history yet'}</span>
+                              </article>
+                            )
+                          })}
                         </div>
-                        <button className={`panel-button ${checkingResults ? 'loading' : ''}`} onClick={handleCheckResults} disabled={checkingResults}>
-                          <span className={checkingResults ? 'button-spinner' : ''} />
-                          <span>{checkingResults ? 'CHECKING RESULTS...' : 'CHECK RESULTS'}</span>
-                        </button>
+                        <div className="micro-note">Updates with empirical data after 10+ samples per box.</div>
                       </section>
 
-                      <section className="dashboard-card ai-performance-card">
-                        <div className="section-title">AI Analyst Performance</div>
-                        <div className="ai-performance-grid">
-                          <div className="mode-mini-card">
-                            <span className="mode-mini-title">Predictions With AI</span>
-                            <strong>{aiStats.totalWithAI}</strong>
-                            <span>Claude form notes recorded</span>
-                          </div>
-                          <div className="mode-mini-card">
-                            <span className="mode-mini-title">Agreement Rate</span>
-                            <strong>{aiAgreementRate}%</strong>
-                            <span>{aiStats.agreedCount}/{aiStats.totalWithAI} aligned</span>
-                          </div>
-                          <div className="mode-mini-card">
-                            <span className="mode-mini-title">When AI Agrees</span>
-                            <strong>{aiStats.agreedWinRate}%</strong>
-                            <span>Win rate with alignment</span>
-                          </div>
-                          <div className="mode-mini-card">
-                            <span className="mode-mini-title">When AI Differs</span>
-                            <strong>{aiStats.disagreedWinRate}%</strong>
-                            <span>Win rate without alignment</span>
-                          </div>
+                      <section className="dashboard-card">
+                        <div className="section-title">Monthly Performance</div>
+                        <div className="table-shell">
+                          <table className="monthly-table">
+                            <thead>
+                              <tr>
+                                <th>Month</th>
+                                <th>Bets</th>
+                                <th>Wins</th>
+                                <th>Win Rate</th>
+                                <th>P&amp;L</th>
+                              </tr>
+                            </thead>
+                            <tbody>
+                              {advancedByMonth.map(row => (
+                                <tr key={row.month} className={row.month === currentMonthKey ? 'current-month' : ''}>
+                                  <td>{formatMonthLabel(row.month)}</td>
+                                  <td>{row.total}</td>
+                                  <td>{row.wins}</td>
+                                  <td className={getAnalyticsWinRateTone(row.winRate)}>{row.winRate}%</td>
+                                  <td className={row.pnl >= 0 ? 'positive' : 'negative'}>{formatSignedCurrency(row.pnl)}</td>
+                                </tr>
+                              ))}
+                            </tbody>
+                            <tfoot>
+                              <tr>
+                                <td>Running Total</td>
+                                <td>{monthTotals.total}</td>
+                                <td>{monthTotals.wins}</td>
+                                <td>{monthTotalsWinRate}%</td>
+                                <td className={monthTotals.pnl >= 0 ? 'positive' : 'negative'}>{formatSignedCurrency(monthTotals.pnl)}</td>
+                              </tr>
+                            </tfoot>
+                          </table>
                         </div>
+                      </section>
+
+                      <section className="dashboard-card calibration-card">
+                        <div className="section-title">Am I Confident In The Right Races?</div>
+                        <div className="dashboard-copy">A well-calibrated model wins about 75% of races it rates 70-79% confident. Red means overconfident, green means underconfident.</div>
+                        <div className="calibration-stack">
+                          {calibrationRows.map(row => {
+                            const tone = getCalibrationTone(row.actualWinRate, row.predictedPct, row.total)
+                            return (
+                              <div className="calibration-row" key={row.bucket}>
+                                <div className="calibration-meta">
+                                  <strong>{row.bucket}</strong>
+                                  <span>{row.total} samples</span>
+                                </div>
+                                <div className="calibration-track">
+                                  <div className="calibration-bar predicted" style={{ width: `${row.predictedPct}%` }} />
+                                  <div className={`calibration-bar actual ${tone}`} style={{ width: `${row.actualWinRate}%` }} />
+                                </div>
+                                <div className="calibration-values">
+                                  <span>Pred {row.predicted}</span>
+                                  <span>Act {row.actualWinRate}%</span>
+                                </div>
+                              </div>
+                            )
+                          })}
+                        </div>
+                      </section>
+
+                      {aiStats.totalWithAI > 0 && (
+                        <section className="dashboard-card ai-performance-card">
+                          <div className="section-title">AI Analyst Performance</div>
+                          <div className="ai-performance-grid">
+                            <div className="mode-mini-card">
+                              <span className="mode-mini-title">AI-Assisted</span>
+                              <strong>{aiStats.totalWithAI}</strong>
+                              <span>Predictions with Claude analysis</span>
+                            </div>
+                            <div className="mode-mini-card">
+                              <span className="mode-mini-title">Agreement Rate</span>
+                              <strong>{aiAgreementRate}%</strong>
+                              <span>{aiStats.agreedCount}/{aiStats.totalWithAI} aligned</span>
+                            </div>
+                            <div className="mode-mini-card">
+                              <span className="mode-mini-title">AI Agrees</span>
+                              <strong>{aiStats.agreedWinRate}%</strong>
+                              <span>Model and Claude on the same page</span>
+                            </div>
+                            <div className="mode-mini-card">
+                              <span className="mode-mini-title">AI Differs</span>
+                              <strong>{aiStats.disagreedWinRate}%</strong>
+                              <span>Performance when opinions split</span>
+                            </div>
+                          </div>
+                          {aiStats.totalWithAI < 10 && (
+                            <div className="micro-note">Check back after 10 AI-assisted predictions for meaningful stats.</div>
+                          )}
+                        </section>
+                      )}
+
+                      <section className="dashboard-card">
+                        <div className="section-title">P&amp;L Curve</div>
+                        {profitCurve.length >= 5 ? (
+                          <div className="profit-curve-wrap">
+                            <svg className="profit-curve-chart" viewBox={`0 0 ${profitChartWidth} ${profitChartHeight}`} preserveAspectRatio="none">
+                              <defs>
+                                <clipPath id="profit-positive-clip">
+                                  <rect x="0" y="0" width={profitChartWidth} height={zeroLineY} />
+                                </clipPath>
+                                <clipPath id="profit-negative-clip">
+                                  <rect x="0" y={zeroLineY} width={profitChartWidth} height={profitChartHeight - zeroLineY} />
+                                </clipPath>
+                              </defs>
+                              <line
+                                x1={profitChartPadding}
+                                x2={profitChartWidth - profitChartPadding}
+                                y1={zeroLineY}
+                                y2={zeroLineY}
+                                className="profit-baseline"
+                              />
+                              <polyline points={profitPoints} className="profit-line positive" clipPath="url(#profit-positive-clip)" />
+                              <polyline points={profitPoints} className="profit-line negative" clipPath="url(#profit-negative-clip)" />
+                              {profitCurve.map((point, index) => (
+                                <circle
+                                  key={`${point.date}-${index}`}
+                                  cx={profitX(index)}
+                                  cy={profitY(Number(point.runningPnl) || 0)}
+                                  r={index === profitCurve.length - 1 ? 4 : 2.5}
+                                  className="profit-point"
+                                />
+                              ))}
+                            </svg>
+                            <div className="profit-curve-meta">
+                              <span>Start {formatSignedCurrency(profitCurve[0]?.runningPnl || 0)}</span>
+                              <span>End {formatSignedCurrency(profitCurve[profitCurve.length - 1]?.runningPnl || 0)}</span>
+                            </div>
+                          </div>
+                        ) : (
+                          <div className="empty-state-card">At least 5 predictions are needed before the P&amp;L curve becomes meaningful.</div>
+                        )}
                       </section>
                     </div>
                   </>
