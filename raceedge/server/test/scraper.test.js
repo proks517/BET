@@ -5,6 +5,7 @@ const path = require('path')
 const {
   parseTheDogsHtml,
   parseRacingAndSportsHtml,
+  fetchMeetingsForDate,
   fetchGreyhoundResult,
   mergeSources,
 } = require('../scraper.js')
@@ -78,6 +79,30 @@ describe('fetchGreyhoundResult', () => {
         third: 'Inside Rail',
         finished: true,
       })
+    } finally {
+      global.fetch = originalFetch
+    }
+  })
+})
+
+describe('fetchMeetingsForDate', () => {
+  test('parses a saved racecards fixture correctly', async () => {
+    const originalFetch = global.fetch
+    const fixture = fix('thedogs-racecards.html')
+
+    global.fetch = async () => ({
+      ok: true,
+      status: 200,
+      text: async () => fixture,
+    })
+
+    try {
+      const meetings = await fetchMeetingsForDate('2026-03-30', 'greyhound')
+
+      assert.deepEqual(meetings, [
+        { track: 'Richmond', slug: 'richmond', raceCount: 12, firstRaceTime: '18:15' },
+        { track: 'Wentworth Park', slug: 'wentworth-park', raceCount: 10, firstRaceTime: '19:05' },
+      ])
     } finally {
       global.fetch = originalFetch
     }

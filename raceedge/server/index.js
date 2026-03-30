@@ -18,15 +18,18 @@ const {
 const {
   research,
   fetchMeetings,
+  fetchMeetingsForDate,
+  fetchAllRacesForMeeting,
   fetchGreyhoundResult,
   fetchHorseResult,
   closeBrowser,
 } = require('./scraper.js')
-const { applyMode, getDefaultBoxBiasTable } = require('./predictor.js')
+const { applyMode, generateBestBets, getDefaultBoxBiasTable } = require('./predictor.js')
 
 const app  = express()
 const PORT = process.env.PORT || 3001
 const RESULT_CHECK_INTERVAL_MS = 30 * 60 * 1000
+const BEST_BETS_CACHE_TTL_MS = 30 * 60 * 1000
 
 const CORS_ORIGIN = process.env.CORS_ORIGIN || 'http://localhost:5173'
 app.use(cors({ origin: CORS_ORIGIN === '*' ? true : CORS_ORIGIN }))
@@ -39,9 +42,168 @@ if (process.env.NODE_ENV === 'production') {
 const db = initDb()
 console.log('[RaceEdge] Database ready')
 let activeResultCheck = null
+const bestBetsCache = new Map()
+const activeBestBetsScans = new Map()
 
 function sleep(ms) {
   return new Promise(resolve => setTimeout(resolve, ms))
+}
+
+function getBestBetsCacheKey(date, type, mode) {
+  return `${date}|${type}|${mode}`
+}
+
+function getCachedBestBets(key) {
+  const entry = bestBetsCache.get(key)
+  if (!entry) return null
+
+  const ageMs = Date.now() - entry.cachedAt
+  if (ageMs >= BEST_BETS_CACHE_TTL_MS) {
+    bestBetsCache.delete(key)
+    return null
+  }
+
+  return {
+    ...entry.payload,
+    cached: true,
+    cacheAgeMinutes: Math.max(0, Math.floor(ageMs / 60000)),
+  }
+}
+
+function setCachedBestBets(key, payload) {
+  bestBetsCache.set(key, {
+    cachedAt: Date.now(),
+    payload,
+  })
+}
+
+function parseClockMinutes(value) {
+  if (!value) return null
+  const match = String(value).match(/^(\d{1,2}):(\d{2})$/)
+  if (!match) return null
+  return (parseInt(match[1], 10) * 60) + parseInt(match[2], 10)
+}
+
+function formatClockMinutes(totalMinutes) {
+  if (!Number.isFinite(totalMinutes)) return null
+  const wrapped = ((Math.round(totalMinutes) % (24 * 60)) + (24 * 60)) % (24 * 60)
+  const hours = String(Math.floor(wrapped / 60)).padStart(2, '0')
+  const minutes = String(wrapped % 60).padStart(2, '0')
+  return `${hours}:${minutes}`
+}
+
+function estimateStartTime(firstRaceTime, raceNumber, raceType) {
+  const baseMinutes = parseClockMinutes(firstRaceTime)
+  if (baseMinutes == null || !Number.isFinite(Number(raceNumber))) return firstRaceTime || null
+  const spacingMinutes = raceType === 'horse' ? 30 : 20
+  return formatClockMinutes(baseMinutes + ((Number(raceNumber) - 1) * spacingMinutes))
+}
+
+function sendSse(res, payload) {
+  res.write(`data: ${JSON.stringify(payload)}\n\n`)
+}
+
+async function executeBestBetsScan({ date, type, mode, emit }) {
+  const startedAt = Date.now()
+  const meetings = await fetchMeetingsForDate(date, type, db)
+  const totalMeetings = meetings.length
+  let totalRacesScanned = 0
+  let allRaces = []
+
+  emit?.({ type: 'scan_start', totalMeetings })
+
+  for (const meeting of meetings) {
+    emit?.({
+      type: 'meeting_start',
+      track: meeting.track,
+      raceCount: meeting.raceCount,
+      totalMeetings,
+    })
+
+    const meetingRaces = await fetchAllRacesForMeeting(
+      date,
+      meeting.track,
+      meeting.raceCount,
+      type,
+      db,
+      progressEvent => {
+        if (progressEvent.type === 'race_done') {
+          totalRacesScanned += 1
+        }
+
+        emit?.({
+          ...progressEvent,
+          totalRacesScanned,
+          totalMeetings,
+        })
+      }
+    )
+
+    const enrichedRaces = meetingRaces.map(race => ({
+      ...race,
+      estimatedStartTime: estimateStartTime(meeting.firstRaceTime, race.raceNumber, type),
+    }))
+
+    allRaces = allRaces.concat(enrichedRaces)
+
+    emit?.({
+      type: 'meeting_done',
+      track: meeting.track,
+      racesScanned: meeting.raceCount,
+      totalRacesScanned,
+      totalMeetings,
+    })
+  }
+
+  return {
+    generatedAt: new Date().toISOString(),
+    date,
+    type,
+    mode,
+    totalRacesScanned,
+    totalMeetings,
+    picks: generateBestBets(allRaces, mode),
+    scanDurationMs: Date.now() - startedAt,
+  }
+}
+
+function getOrStartBestBetsScan({ date, type, mode }) {
+  const key = getBestBetsCacheKey(date, type, mode)
+  const cached = getCachedBestBets(key)
+  if (cached) {
+    return { key, cached }
+  }
+
+  let active = activeBestBetsScans.get(key)
+  if (!active) {
+    const listeners = new Set()
+    const emit = payload => {
+      for (const listener of listeners) {
+        listener(payload)
+      }
+    }
+
+    const promise = executeBestBetsScan({ date, type, mode, emit })
+      .then(payload => {
+        setCachedBestBets(key, payload)
+        const completePayload = { type: 'complete', cached: false, cacheAgeMinutes: 0, ...payload }
+        emit(completePayload)
+        return completePayload
+      })
+      .catch(err => {
+        const errorPayload = { type: 'error', message: err.message }
+        emit(errorPayload)
+        throw err
+      })
+      .finally(() => {
+        activeBestBetsScans.delete(key)
+      })
+
+    active = { promise, listeners }
+    activeBestBetsScans.set(key, active)
+  }
+
+  return { key, active }
 }
 
 function getResultSourceConfig(prediction) {
@@ -152,7 +314,7 @@ app.get('/api/meetings', async (req, res) => {
   const { date, type } = req.query
   if (!date || !type) return res.status(400).json({ error: 'date and type are required' })
   try {
-    res.json({ meetings: await fetchMeetings(date, type) })
+    res.json({ meetings: await fetchMeetings(date, type, db) })
   } catch (err) {
     res.status(500).json({ error: err.message })
   }
@@ -276,6 +438,85 @@ app.get('/api/predictions', (req, res) => {
     res.json({ predictions: getPredictions(db) })
   } catch (err) {
     res.status(500).json({ error: err.message })
+  }
+})
+
+// GET /api/best-bets?date=YYYY-MM-DD&type=greyhound|horse&mode=safest|value|longshot
+app.get('/api/best-bets', async (req, res) => {
+  const { date, type, mode } = req.query
+  if (!date || !type || !mode) {
+    return res.status(400).json({ error: 'date, type, and mode are required' })
+  }
+
+  if (!['greyhound', 'horse'].includes(type)) {
+    return res.status(400).json({ error: 'type must be greyhound or horse' })
+  }
+
+  if (!['safest', 'value', 'longshot'].includes(mode)) {
+    return res.status(400).json({ error: 'mode must be safest, value, or longshot' })
+  }
+
+  try {
+    const { cached, active } = getOrStartBestBetsScan({ date, type, mode })
+    if (cached) {
+      res.set('X-Scan-Duration-Ms', String(cached.scanDurationMs || 0))
+      return res.json(cached)
+    }
+
+    const payload = await active.promise
+    const { type: eventType, ...responsePayload } = payload
+    res.set('X-Scan-Duration-Ms', String(responsePayload.scanDurationMs || 0))
+    res.json(responsePayload)
+  } catch (err) {
+    console.error('[/api/best-bets]', err)
+    res.status(500).json({ error: err.message })
+  }
+})
+
+// GET /api/best-bets/stream?date=YYYY-MM-DD&type=greyhound|horse&mode=safest|value|longshot
+app.get('/api/best-bets/stream', async (req, res) => {
+  const { date, type, mode } = req.query
+  if (!date || !type || !mode) {
+    return res.status(400).json({ error: 'date, type, and mode are required' })
+  }
+
+  if (!['greyhound', 'horse'].includes(type)) {
+    return res.status(400).json({ error: 'type must be greyhound or horse' })
+  }
+
+  if (!['safest', 'value', 'longshot'].includes(mode)) {
+    return res.status(400).json({ error: 'mode must be safest, value, or longshot' })
+  }
+
+  res.setHeader('Content-Type', 'text/event-stream')
+  res.setHeader('Cache-Control', 'no-cache, no-transform')
+  res.setHeader('Connection', 'keep-alive')
+  res.flushHeaders?.()
+
+  const { cached, active } = getOrStartBestBetsScan({ date, type, mode })
+  if (cached) {
+    sendSse(res, { type: 'complete', ...cached })
+    return res.end()
+  }
+
+  const listener = payload => {
+    sendSse(res, payload)
+    if (payload.type === 'complete' || payload.type === 'error') {
+      res.end()
+    }
+  }
+
+  active.listeners.add(listener)
+  req.on('close', () => {
+    active.listeners.delete(listener)
+  })
+
+  try {
+    await active.promise
+  } catch {
+    if (!res.writableEnded) {
+      res.end()
+    }
   }
 })
 

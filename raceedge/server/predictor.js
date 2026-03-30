@@ -444,6 +444,49 @@ function applyMode(runners, mode) {
   }
 }
 
+function generateBestBets(allRaces, mode) {
+  if (!Array.isArray(allRaces) || allRaces.length === 0) {
+    return []
+  }
+
+  const picks = allRaces
+    .filter(race => Array.isArray(race.runners) && race.runners.length > 0)
+    .map(race => {
+      const prediction = applyMode(race.runners, mode)
+
+      return {
+        track: race.track,
+        raceNumber: race.raceNumber,
+        distance: race.distance ?? getDistanceMeters(prediction.runner) ?? null,
+        grade: race.grade ?? prediction.runner.grade ?? null,
+        runnerName: prediction.runner.name,
+        box: prediction.runner.box ?? prediction.runner.barrier ?? null,
+        compositeScore: prediction.compositeScore ?? prediction.score,
+        confidence: prediction.confidence,
+        mode,
+        breakdown: prediction.breakdown,
+        estimatedStartTime: race.estimatedStartTime ?? null,
+        reasoning: prediction.reasoning,
+        allScores: prediction.allScores,
+        runner: prediction.runner,
+        boxBiasSource: prediction.boxBiasSource,
+      }
+    })
+    .sort((left, right) =>
+      (right.compositeScore - left.compositeScore) ||
+      (right.confidence - left.confidence) ||
+      String(left.track).localeCompare(String(right.track)) ||
+      ((left.raceNumber || 0) - (right.raceNumber || 0))
+    )
+    .slice(0, 10)
+    .map((pick, index) => ({
+      rank: index + 1,
+      ...pick,
+    }))
+
+  return picks
+}
+
 module.exports = {
   FACTOR_WEIGHTS,
   buildScoreBreakdown,
@@ -456,4 +499,5 @@ module.exports = {
   scoreTrainerStrikeRate,
   scoreDaysSinceLastRun,
   applyMode,
+  generateBestBets,
 }

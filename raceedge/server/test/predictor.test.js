@@ -10,6 +10,7 @@ const {
   scoreTrainerStrikeRate,
   scoreDaysSinceLastRun,
   applyMode,
+  generateBestBets,
 } = require('../predictor.js')
 
 describe('scoreRecentForm', () => {
@@ -369,5 +370,62 @@ describe('applyMode', () => {
   test('handles a single-runner field gracefully', () => {
     const result = applyMode([field[0]], 'safest')
     assert.equal(result.runner.name, 'Anchor')
+  })
+})
+
+describe('generateBestBets', () => {
+  function buildRace(index, overrides = {}) {
+    return {
+      track: `Track ${String(index).padStart(2, '0')}`,
+      raceNumber: index,
+      distance: 320 + index,
+      estimatedStartTime: `1${index % 10}:0${index % 6}`,
+      runners: [
+        {
+          name: `Runner ${index}`,
+          box: ((index - 1) % 8) + 1,
+          distanceMeters: 320 + index,
+          lastStarts: overrides.lastStarts ?? (index <= 4 ? '1-1-1-1-1-1' : index <= 8 ? '1-2-2-2-3-3' : '3-4-4-5-5-6'),
+          bestTime: overrides.bestTime ?? (28.8 + (index * 0.05)),
+          trainerStrike: overrides.trainerStrike ?? Math.max(4, 30 - index),
+          careerTop3Pct: overrides.careerTop3Pct ?? Math.max(10, 85 - (index * 4)),
+          daysSinceLastRun: overrides.daysSinceLastRun ?? (index <= 4 ? 10 : index <= 8 ? 18 : 32),
+        },
+      ],
+      ...overrides.race,
+    }
+  }
+
+  test('returns the top 10 picks ranked by composite score descending', () => {
+    const races = Array.from({ length: 12 }, (_, index) => buildRace(index + 1))
+    const picks = generateBestBets(races, 'safest')
+
+    assert.equal(picks.length, 10)
+    assert.equal(picks[0].rank, 1)
+    assert.equal(picks[9].rank, 10)
+
+    for (let index = 1; index < picks.length; index += 1) {
+      assert.ok(picks[index - 1].compositeScore >= picks[index].compositeScore)
+    }
+  })
+
+  test('handles an empty race list gracefully', () => {
+    assert.deepEqual(generateBestBets([], 'value'), [])
+  })
+
+  test('handles races with a single runner', () => {
+    const picks = generateBestBets([buildRace(1)], 'safest')
+
+    assert.equal(picks.length, 1)
+    assert.equal(picks[0].runnerName, 'Runner 1')
+    assert.equal(picks[0].rank, 1)
+  })
+
+  test('includes the selected mode and detailed breakdown in each pick', () => {
+    const picks = generateBestBets([buildRace(2)], 'longshot')
+
+    assert.equal(picks[0].mode, 'longshot')
+    assert.ok(picks[0].breakdown)
+    assert.equal(typeof picks[0].confidence, 'number')
   })
 })

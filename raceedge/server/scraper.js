@@ -88,6 +88,89 @@ function cleanText(value) {
     .trim()
 }
 
+function normalizeTimeText(value) {
+  const text = cleanText(value)
+  if (!text) return null
+
+  const isoMatch = text.match(/T(\d{2}):(\d{2})/)
+  if (isoMatch) {
+    return `${isoMatch[1]}:${isoMatch[2]}`
+  }
+
+  const direct = text.match(/\b(\d{1,2}):(\d{2})\s*([AP]M)?\b/i)
+  if (!direct) return null
+
+  let hours = parseInt(direct[1], 10)
+  const minutes = direct[2]
+  const meridiem = direct[3]?.toUpperCase()
+
+  if (meridiem === 'PM' && hours < 12) hours += 12
+  if (meridiem === 'AM' && hours === 12) hours = 0
+
+  if (hours < 0 || hours > 23) return null
+  return `${String(hours).padStart(2, '0')}:${minutes}`
+}
+
+function normalizeDateText(value) {
+  const text = cleanText(value)
+  if (!text) return null
+
+  if (/^\d{4}-\d{2}-\d{2}$/.test(text)) return text
+
+  const slashMatch = text.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/)
+  if (slashMatch) {
+    const [, day, month, year] = slashMatch
+    return `${year}-${month.padStart(2, '0')}-${day.padStart(2, '0')}`
+  }
+
+  const parsed = new Date(text)
+  if (!Number.isNaN(parsed.getTime())) {
+    return parsed.toLocaleDateString('en-CA')
+  }
+
+  return null
+}
+
+function extractInteger(value) {
+  const match = cleanText(value).match(/(\d{1,4})/)
+  return match ? parseInt(match[1], 10) : null
+}
+
+function extractDistanceMetersFromText(value) {
+  const text = cleanText(value).toLowerCase()
+  const match = text.match(/(\d{3,4})\s?m\b/)
+  return match ? parseInt(match[1], 10) : null
+}
+
+function extractRaceMeta($) {
+  const candidateText = [
+    $('.race-header').first().text(),
+    $('.race-meta').first().text(),
+    $('.meeting-meta').first().text(),
+    $('.event-header').first().text(),
+    $('.race-summary').first().text(),
+    $('body').text(),
+  ].map(cleanText).find(Boolean) || ''
+
+  const distance = extractDistanceMetersFromText(candidateText)
+  const gradeMatch = candidateText.match(/\b(grade\s*[a-z0-9+/ -]+|maiden|mixed\s*\d\/\d|class\s*\d+|benchmark\s*\d+)\b/i)
+
+  return {
+    distance,
+    grade: cleanText(gradeMatch?.[1]) || null,
+  }
+}
+
+function enrichRunnersWithRaceMeta(runners, meta, date, raceType) {
+  return runners.map(runner => ({
+    ...runner,
+    distanceMeters: runner.distanceMeters ?? meta.distance ?? undefined,
+    grade: runner.grade ?? meta.grade ?? undefined,
+    raceDate: runner.raceDate ?? date,
+    raceType: runner.raceType ?? raceType,
+  }))
+}
+
 function slugifyTrack(track) {
   return cleanText(track)
     .toLowerCase()
@@ -255,7 +338,9 @@ async function fetchTheDogs(date, track, raceNumber) {
     const cached = getCached(key)
     if (cached) return cached
     const res = await fetchWithRetry(url, FETCH_OPTS)
-    const runners = parseTheDogsHtml(await res.text())
+    const html = await res.text()
+    const meta = extractRaceMeta(cheerio.load(html))
+    const runners = enrichRunnersWithRaceMeta(parseTheDogsHtml(html), meta, date, 'greyhound')
     const result = { source: 'thedogs.com.au', runners, error: null }
     setCache(key, result)
     return result
@@ -292,7 +377,9 @@ async function fetchRacingAndSports(date, track, raceNumber, raceType) {
     const cached = getCached(key)
     if (cached) return cached
     const res = await fetchWithRetry(url, FETCH_OPTS)
-    const runners = parseRacingAndSportsHtml(await res.text())
+    const html = await res.text()
+    const meta = extractRaceMeta(cheerio.load(html))
+    const runners = enrichRunnersWithRaceMeta(parseRacingAndSportsHtml(html), meta, date, raceType)
     const result = { source: 'racingandsports.com.au', runners, error: null }
     setCache(key, result)
     return result
@@ -421,26 +508,172 @@ async function fetchGBOTA(date, track, raceNumber) {
 const FALLBACK_DOGS   = ['Sandown Park','The Meadows','Shepparton','Geelong','Ballarat','Wentworth Park','Dapto','Richmond','Albion Park','Angle Park']
 const FALLBACK_HORSES = ['Flemington','Caulfield','Moonee Valley','Randwick','Rosehill','Doomben','Eagle Farm','Morphettville','Ascot','Ellerslie']
 
-async function fetchMeetings(date, raceType) {
-  const seg = raceType === 'greyhound' ? 'greyhounds' : 'horse-racing'
-  const url = `https://www.racingandsports.com.au/${seg}/form/${date}`
+function parseMeetingsForDateHtml(html, date) {
+  const $ = cheerio.load(html)
+  const seen = new Set()
+  const meetings = []
+
+  $('.meeting-card, .racecard-meeting, .meeting-row, .racecard-row, [data-track], [data-meeting]').each((_, element) => {
+    const $element = $(element)
+    const meetingDate = normalizeDateText(
+      $element.attr('data-date') ||
+      $element.find('[data-date], .meeting-date, .date, time').first().attr('data-date') ||
+      $element.find('[data-date], .meeting-date, .date, time').first().attr('datetime') ||
+      $element.find('[data-date], .meeting-date, .date, time').first().text()
+    )
+
+    if (meetingDate && meetingDate !== date) return
+
+    const track = cleanText(
+      $element.attr('data-track') ||
+      $element.attr('data-meeting') ||
+      $element.find('.track-name, .meeting-name, .venue-name, h2, h3, h4, .name').first().text()
+    )
+    if (!track) return
+
+    const raceCount = extractInteger(
+      $element.attr('data-race-count') ||
+      $element.find('.race-count, .races-count, .race-total, .meta-races').first().text()
+    ) || $element.find('[href*="race-"], [href*="/race/"]').length || 12
+
+    const firstRaceTime = normalizeTimeText(
+      $element.attr('data-first-race-time') ||
+      $element.find('.first-race-time, .meeting-time, .time, time').first().attr('datetime') ||
+      $element.find('.first-race-time, .meeting-time, .time, time').first().text()
+    )
+
+    const href = $element.find('a[href]').first().attr('href') || ''
+    const slugFromHref = href
+      .split('/')
+      .filter(Boolean)
+      .reverse()
+      .find(segment => !/^\d+$/.test(segment))
+    const slug = cleanText(
+      $element.attr('data-slug') ||
+      slugFromHref ||
+      slugifyTrack(track)
+    )
+
+    const key = `${track.toLowerCase()}|${raceCount}|${firstRaceTime || ''}`
+    if (seen.has(key)) return
+    seen.add(key)
+
+    meetings.push({
+      track,
+      slug: slug || slugifyTrack(track),
+      raceCount,
+      firstRaceTime: firstRaceTime || null,
+    })
+  })
+
+  return meetings
+}
+
+async function fetchMeetingsForDate(date, raceType, db) {
+  const url = raceType === 'greyhound'
+    ? 'https://www.thedogs.com.au/racing/racecards'
+    : `https://www.racingandsports.com.au/${raceType === 'greyhound' ? 'greyhounds' : 'horse-racing'}/form/${date}`
+  const sourceName = raceType === 'greyhound' ? 'thedogs' : 'racingandsports'
+  const startedAt = Date.now()
+
   try {
-    const key = `meetings|${date}|${raceType}`
+    const key = `meetings-for-date|${date}|${raceType}`
     const cached = getCached(key)
     if (cached) return cached
+
     const res = await fetchWithRetry(url, FETCH_OPTS)
-    const $ = cheerio.load(await res.text())
-    const meetings = []
-    $('.venue-name, .track-name, .meeting-name').each((_, el) => {
-      const name = $(el).text().trim()
-      if (name && name.length > 2 && !meetings.includes(name)) meetings.push(name)
+    const html = await res.text()
+    const meetings = parseMeetingsForDateHtml(html, date)
+
+    saveScraperHealth(db, {
+      source_name: sourceName,
+      race_date: date,
+      track: 'ALL',
+      race_number: 0,
+      status: meetings.length > 0 ? 'success' : 'empty',
+      response_time_ms: Math.max(0, Date.now() - startedAt),
+      records_returned: meetings.length,
+      error_message: null,
     })
-    const result = meetings.length > 0 ? meetings : (raceType === 'greyhound' ? FALLBACK_DOGS : FALLBACK_HORSES)
-    setCache(key, result)
-    return result
-  } catch {
-    return raceType === 'greyhound' ? FALLBACK_DOGS : FALLBACK_HORSES
+
+    if (meetings.length > 0) {
+      setCache(key, meetings)
+      return meetings
+    }
+
+    return []
+  } catch (err) {
+    saveScraperHealth(db, {
+      source_name: sourceName,
+      race_date: date,
+      track: 'ALL',
+      race_number: 0,
+      status: /timeout|timed out|abort/i.test(err.message) ? 'timeout' : 'error',
+      response_time_ms: Math.max(0, Date.now() - startedAt),
+      records_returned: 0,
+      error_message: err.message,
+    })
+    return []
   }
+}
+
+async function fetchMeetings(date, raceType, db) {
+  const meetings = await fetchMeetingsForDate(date, raceType, db)
+  if (meetings.length > 0) {
+    return meetings.map(meeting => meeting.track)
+  }
+
+  return raceType === 'greyhound' ? FALLBACK_DOGS : FALLBACK_HORSES
+}
+
+async function fetchAllRacesForMeeting(date, track, raceCount, raceType, db, onProgress) {
+  const totalRaces = Math.max(0, Number(raceCount) || 0)
+  const races = []
+
+  for (let raceNumber = 1; raceNumber <= totalRaces; raceNumber += 1) {
+    try {
+      const scrape = await research(date, track, raceNumber, raceType, db)
+      const distance = scrape.runners
+        .map(runner => runner.distanceMeters)
+        .find(value => Number.isFinite(value)) ?? null
+      const grade = scrape.runners
+        .map(runner => cleanText(runner.grade))
+        .find(Boolean) || null
+
+      onProgress?.({
+        type: 'race_done',
+        track,
+        raceNumber,
+        runnersFound: scrape.runners.length,
+      })
+
+      if (scrape.runners.length > 0) {
+        races.push({
+          track,
+          raceNumber,
+          runners: scrape.runners,
+          distance,
+          grade,
+          sourcesUsed: scrape.sourcesUsed,
+          sourcesSkipped: scrape.sourcesSkipped,
+        })
+      }
+    } catch (err) {
+      onProgress?.({
+        type: 'race_done',
+        track,
+        raceNumber,
+        runnersFound: 0,
+        error: err.message,
+      })
+    }
+
+    if (raceNumber < totalRaces) {
+      await new Promise(resolve => setTimeout(resolve, 500))
+    }
+  }
+
+  return races
 }
 
 // ── Puppeteer layer ───────────────────────────────────────────────────────────
@@ -716,9 +949,12 @@ async function closeBrowser() {
 module.exports = {
   research,
   fetchMeetings,
+  fetchMeetingsForDate,
+  fetchAllRacesForMeeting,
   closeBrowser,
   parseTheDogsHtml,
   parseRacingAndSportsHtml,
+  parseMeetingsForDateHtml,
   parseGreyhoundResultHtml,
   parseHorseResultHtml,
   fetchGreyhoundResult,

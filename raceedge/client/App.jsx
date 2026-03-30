@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from 'react'
+import { useState, useEffect, useCallback, useRef } from 'react'
 import './App.css'
 import ReactDOM from 'react-dom/client'
 
@@ -30,6 +30,7 @@ const HEALTH_SOURCE_LABELS = {
 
 const SCRAPER_HEALTH_SOURCES = Object.keys(HEALTH_SOURCE_LABELS)
 const DASHBOARD_TABS = [
+  { key: 'bestBets', label: 'BEST BETS', icon: '🎯' },
   { key: 'overview', label: 'Overview', icon: '◫' },
   { key: 'predictions', label: 'Predictions', icon: '⟲' },
   { key: 'journal', label: 'Journal', icon: '✎' },
@@ -66,6 +67,19 @@ function formatClock(value) {
     hour: '2-digit',
     minute: '2-digit',
     second: '2-digit',
+  })
+}
+
+function formatTimestamp(value) {
+  if (!value) return '—'
+  const parsed = new Date(value)
+  if (Number.isNaN(parsed.getTime())) return '—'
+  return parsed.toLocaleString('en-AU', {
+    day: '2-digit',
+    month: 'short',
+    year: 'numeric',
+    hour: '2-digit',
+    minute: '2-digit',
   })
 }
 
@@ -207,7 +221,15 @@ function App() {
   const [healthLoading, setHealthLoading] = useState(false)
   const [pendingPredictions, setPendingPredictions] = useState([])
   const [checkingResults, setCheckingResults] = useState(false)
-  const [dashboardTab, setDashboardTab] = useState('overview')
+  const [dashboardTab, setDashboardTab] = useState('bestBets')
+  const [bestBetsDate, setBestBetsDate] = useState(todayStr())
+  const [bestBetsType, setBestBetsType] = useState('greyhound')
+  const [bestBetsMode, setBestBetsMode] = useState('value')
+  const [bestBetsLoading, setBestBetsLoading] = useState(false)
+  const [bestBetsResult, setBestBetsResult] = useState(null)
+  const [bestBetsLog, setBestBetsLog] = useState([])
+  const [bestBetsProgress, setBestBetsProgress] = useState({ totalMeetings: 0, meetingsCompleted: 0, racesChecked: 0, currentTrack: '' })
+  const [quickBetTarget, setQuickBetTarget] = useState(null)
   const [boxBiasTrack, setBoxBiasTrack] = useState('')
   const [boxBiasDistance, setBoxBiasDistance] = useState(400)
   const [boxBiasData, setBoxBiasData] = useState({ source: 'default', message: 'Select a track and distance', boxes: [] })
@@ -215,6 +237,7 @@ function App() {
   const [journalEntries, setJournalEntries] = useState([])
   const [journalLoading, setJournalLoading] = useState(false)
   const [expandedJournalId, setExpandedJournalId] = useState(null)
+  const bestBetsStreamRef = useRef(null)
 
   const loadStats = useCallback(() => {
     fetch('/api/stats').then(r => r.json()).then(setStats).catch(() => {})
@@ -260,6 +283,17 @@ function App() {
       .then(data => setJournalEntries(data.entries || []))
       .catch(() => {})
       .finally(() => setJournalLoading(false))
+  }, [])
+
+  const closeBestBetsStream = useCallback(() => {
+    if (bestBetsStreamRef.current) {
+      bestBetsStreamRef.current.close()
+      bestBetsStreamRef.current = null
+    }
+  }, [])
+
+  const appendBestBetsLog = useCallback(message => {
+    setBestBetsLog(current => [...current.slice(-29), message])
   }, [])
 
   useEffect(() => {
@@ -338,6 +372,26 @@ function App() {
     if (!boxBiasTrack || !boxBiasDistance) return
     loadBoxBias(boxBiasTrack, boxBiasDistance)
   }, [boxBiasTrack, boxBiasDistance, loadBoxBias])
+
+  useEffect(() => () => {
+    closeBestBetsStream()
+  }, [closeBestBetsStream])
+
+  useEffect(() => {
+    if (!quickBetTarget) return
+    if (quickBetTarget.date !== date || quickBetTarget.raceType !== raceType) return
+    if (meetings.length === 0) return
+
+    setMeeting(quickBetTarget.track)
+    setRaceNum(quickBetTarget.raceNumber)
+    setDistance(quickBetTarget.distance || 0)
+    setMode(quickBetTarget.mode)
+    setBoxBiasTrack(quickBetTarget.track)
+    if (quickBetTarget.distance) {
+      setBoxBiasDistance(quickBetTarget.distance)
+    }
+    setQuickBetTarget(null)
+  }, [quickBetTarget, meetings, date, raceType])
 
   async function handleResearch() {
     if (!meeting) return
@@ -426,6 +480,147 @@ function App() {
       setError(e.message)
     } finally {
       setCheckingResults(false)
+    }
+  }
+
+  function handleQuickBet(pick) {
+    const selectedDate = bestBetsResult?.date || bestBetsDate
+    const selectedType = bestBetsResult?.type || bestBetsType
+
+    setQuickBetTarget({
+      date: selectedDate,
+      raceType: selectedType,
+      track: pick.track,
+      raceNumber: pick.raceNumber,
+      distance: pick.distance || 0,
+      mode: pick.mode || bestBetsMode,
+    })
+    setDate(selectedDate)
+    setRaceType(selectedType)
+    setRaceNum(pick.raceNumber)
+    setDistance(pick.distance || 0)
+    setMode(pick.mode || bestBetsMode)
+    setBoxBiasTrack(pick.track)
+    if (pick.distance) {
+      setBoxBiasDistance(pick.distance)
+    }
+    setDashboardTab('overview')
+    window.scrollTo({ top: 0, behavior: 'smooth' })
+    setNotice({
+      kind: 'success',
+      message: `Prefilled ${pick.track} R${pick.raceNumber} for a full research deep-dive.`,
+    })
+  }
+
+  function handleBestBetsScan() {
+    if (bestBetsLoading) return
+
+    closeBestBetsStream()
+    setBestBetsLoading(true)
+    setBestBetsResult(null)
+    setBestBetsLog([])
+    setBestBetsProgress({ totalMeetings: 0, meetingsCompleted: 0, racesChecked: 0, currentTrack: '' })
+
+    const params = new URLSearchParams({
+      date: bestBetsDate,
+      type: bestBetsType,
+      mode: bestBetsMode,
+    })
+
+    appendBestBetsLog(`⏳ Starting day scan for ${bestBetsDate} (${bestBetsType}, ${bestBetsMode})...`)
+
+    const stream = new EventSource(`/api/best-bets/stream?${params.toString()}`)
+    let completed = false
+    bestBetsStreamRef.current = stream
+
+    stream.onmessage = event => {
+      let payload
+
+      try {
+        payload = JSON.parse(event.data)
+      } catch {
+        return
+      }
+
+      if (payload.type === 'scan_start') {
+        setBestBetsProgress(current => ({
+          ...current,
+          totalMeetings: payload.totalMeetings || 0,
+        }))
+        appendBestBetsLog(`⏳ Scanning ${payload.totalMeetings || 0} meetings. This cannot be cancelled once started.`)
+        return
+      }
+
+      if (payload.type === 'meeting_start') {
+        setBestBetsProgress(current => ({
+          ...current,
+          currentTrack: payload.track || current.currentTrack,
+          totalMeetings: payload.totalMeetings ?? current.totalMeetings,
+        }))
+        appendBestBetsLog(`⏳ ${payload.track} — scanning ${payload.raceCount} races...`)
+        return
+      }
+
+      if (payload.type === 'race_done') {
+        const runnersFound = payload.runnersFound || 0
+        const prefix = payload.error ? '❌' : runnersFound > 0 ? '✅' : '•'
+        const suffix = payload.error ? payload.error : `${runnersFound} runner${runnersFound === 1 ? '' : 's'} found`
+
+        setBestBetsProgress(current => ({
+          ...current,
+          racesChecked: payload.totalRacesScanned ?? (current.racesChecked + 1),
+          currentTrack: payload.track || current.currentTrack,
+          totalMeetings: payload.totalMeetings ?? current.totalMeetings,
+        }))
+        appendBestBetsLog(`${prefix} ${payload.track} R${payload.raceNumber} — ${suffix}`)
+        return
+      }
+
+      if (payload.type === 'meeting_done') {
+        setBestBetsProgress(current => ({
+          ...current,
+          meetingsCompleted: current.meetingsCompleted + 1,
+          racesChecked: payload.totalRacesScanned ?? current.racesChecked,
+          currentTrack: payload.track || current.currentTrack,
+          totalMeetings: payload.totalMeetings ?? current.totalMeetings,
+        }))
+        appendBestBetsLog(`✅ ${payload.track} complete — ${payload.racesScanned} races checked.`)
+        return
+      }
+
+      if (payload.type === 'complete') {
+        completed = true
+        closeBestBetsStream()
+        setBestBetsLoading(false)
+        setBestBetsResult(payload)
+        setBestBetsProgress(current => ({
+          ...current,
+          racesChecked: payload.totalRacesScanned ?? current.racesChecked,
+          meetingsCompleted: payload.totalMeetings ?? current.meetingsCompleted,
+          totalMeetings: payload.totalMeetings ?? current.totalMeetings,
+        }))
+        appendBestBetsLog(
+          payload.cached
+            ? `✅ Cached result loaded from ${payload.cacheAgeMinutes || 0} minute(s) ago.`
+            : `✅ Scan complete — ${payload.picks?.length || 0} picks ranked from ${payload.totalRacesScanned} races.`
+        )
+        return
+      }
+
+      if (payload.type === 'error') {
+        completed = true
+        closeBestBetsStream()
+        setBestBetsLoading(false)
+        appendBestBetsLog(`❌ ${payload.message}`)
+        setError(payload.message || 'Best bets scan failed')
+      }
+    }
+
+    stream.onerror = () => {
+      if (completed) return
+      closeBestBetsStream()
+      setBestBetsLoading(false)
+      setError('Best bets scan stream disconnected')
     }
   }
 
@@ -774,7 +969,7 @@ function App() {
                 {DASHBOARD_TABS.map(tab => (
                   <button
                     key={tab.key}
-                    className={`dashboard-tab-button ${dashboardTab === tab.key ? 'active' : ''}`}
+                    className={`dashboard-tab-button ${tab.key === 'bestBets' ? 'best-bets-tab' : ''} ${dashboardTab === tab.key ? 'active' : ''}`}
                     onClick={() => setDashboardTab(tab.key)}
                   >
                     <span className="dashboard-tab-icon">{tab.icon}</span>
@@ -787,6 +982,141 @@ function App() {
               </div>
 
               <div className="dashboard-stage" key={dashboardTab}>
+                {dashboardTab === 'bestBets' && (
+                  <section className="dashboard-card best-bets-shell">
+                    <div className="tab-toolbar">
+                      <div>
+                        <div className="section-title">Today&apos;s Best Bets</div>
+                        <div className="dashboard-copy">Scan every meeting for a day, rank the strongest picks by composite score, and jump straight into a race for a deeper research pass.</div>
+                      </div>
+                    </div>
+
+                    <div className="best-bets-controls">
+                      <label>
+                        Scan Date
+                        <input type="date" value={bestBetsDate} onChange={event => setBestBetsDate(event.target.value)} />
+                      </label>
+
+                      <div>
+                        <div className="control-label">Race Type</div>
+                        <div className="race-type-toggle">
+                          <button className={`race-type-button ${bestBetsType === 'greyhound' ? 'active' : ''}`} onClick={() => setBestBetsType('greyhound')}>
+                            🐕 GREYHOUNDS
+                          </button>
+                          <button className={`race-type-button ${bestBetsType === 'horse' ? 'active' : ''}`} onClick={() => setBestBetsType('horse')}>
+                            🐎 HORSES
+                          </button>
+                        </div>
+                      </div>
+
+                      <div>
+                        <div className="control-label">Mode</div>
+                        <div className="mode-card-grid best-bets-mode-grid">
+                          {MODE_CARDS.map(card => (
+                            <button
+                              key={`best-bets-${card.key}`}
+                              className={`mode-card ${card.accent} ${bestBetsMode === card.key ? 'active' : ''}`}
+                              onClick={() => setBestBetsMode(card.key)}
+                            >
+                              <span className="mode-icon">{card.icon}</span>
+                              <span className="mode-title">{card.label}</span>
+                            </button>
+                          ))}
+                        </div>
+                      </div>
+
+                      <button className={`research-button best-bets-button ${bestBetsLoading ? 'loading' : ''}`} onClick={handleBestBetsScan} disabled={bestBetsLoading}>
+                        <span className={bestBetsLoading ? 'button-spinner' : ''} />
+                        <span>{bestBetsLoading ? 'SCANNING ALL RACES...' : 'SCAN ALL RACES'}</span>
+                      </button>
+
+                      <div className="micro-note">Scanning all races may take 2-3 minutes. Once started, this scan cannot be cancelled.</div>
+                    </div>
+
+                    {bestBetsLoading && (
+                      <>
+                        <div className="scan-progress">
+                          <strong>Scanning {bestBetsProgress.totalMeetings || '…'} meetings... {bestBetsProgress.racesChecked} races checked so far.</strong>
+                          <span>{bestBetsProgress.currentTrack ? `Current meeting: ${bestBetsProgress.currentTrack}` : 'Waiting for the first meeting to begin...'}</span>
+                        </div>
+
+                        <div className="terminal-panel">
+                          <div className="section-title">Live Scan Feed</div>
+                          <div className="terminal-lines">
+                            {bestBetsLog.map((entry, index) => (
+                              <div
+                                key={`${entry}-${index}`}
+                                className={`terminal-line ${entry.startsWith('❌') ? 'failed' : entry.startsWith('✅') ? 'success' : 'checking'}`}
+                              >
+                                {entry}
+                              </div>
+                            ))}
+                          </div>
+                        </div>
+                      </>
+                    )}
+
+                    {!bestBetsLoading && !bestBetsResult && (
+                      <div className="empty-state-card">Run a day-wide scan to surface the strongest ranked opportunities for the selected date.</div>
+                    )}
+
+                    {bestBetsResult && (
+                      <div className="best-bets-results">
+                        <div className="best-bets-heading">
+                          <div className="section-eyebrow">TOP 10 PICKS FOR TODAY</div>
+                          <h3 className="best-bets-title">Top 10 Picks For {bestBetsResult.date}</h3>
+                          <div className="dashboard-copy">Generated {formatTimestamp(bestBetsResult.generatedAt)} · {bestBetsResult.totalMeetings} meetings · {bestBetsResult.totalRacesScanned} races checked</div>
+                          {bestBetsResult.cached && (
+                            <div className="micro-note">Cached result from {bestBetsResult.cacheAgeMinutes || 0} minute(s) ago.</div>
+                          )}
+                        </div>
+
+                        <div className="best-bets-grid">
+                          {bestBetsResult.picks?.map(pick => (
+                            <article className="best-bet-card" key={`${pick.track}-${pick.raceNumber}-${pick.runnerName}`}>
+                              <div className="best-bet-head">
+                                <span className={`rank-badge ${pick.rank === 1 ? 'gold' : pick.rank === 2 ? 'silver' : pick.rank === 3 ? 'bronze' : 'rest'}`}>#{pick.rank}</span>
+                                <div className="best-bet-heading-copy">
+                                  <div className="best-bet-meta">{pick.track} · Race {pick.raceNumber} · {pick.distance ? `${pick.distance}m` : 'Distance TBC'}</div>
+                                  <div className="best-bet-runner">{pick.runnerName}</div>
+                                </div>
+                                {pick.box != null && <span className={`box-pill ${getBoxBadgeClass(pick.box)}`}>BOX {pick.box}</span>}
+                              </div>
+
+                              <div className="best-bet-submeta">
+                                <span className="meta-pill">{formatModeLabel(pick.mode)}</span>
+                                {pick.estimatedStartTime && <span className="meta-pill">Start {pick.estimatedStartTime}</span>}
+                                {pick.grade && <span className="meta-pill">{pick.grade}</span>}
+                              </div>
+
+                              <div className="confidence-caption">Confidence</div>
+                              <div className="confidence-meter">
+                                <div className="confidence-meter-fill" style={{ width: `${pick.confidence}%` }} />
+                              </div>
+
+                              <div className="best-bet-footer">
+                                <strong>{pick.confidence}% confidence</strong>
+                                <span className="journal-meta-pill">Composite {pick.compositeScore}</span>
+                              </div>
+
+                              <button className="panel-button quick-bet-button" onClick={() => handleQuickBet(pick)}>
+                                QUICK BET
+                              </button>
+                            </article>
+                          ))}
+                        </div>
+
+                        <div className="best-bets-actions">
+                          <button className="panel-button secondary" onClick={handleBestBetsScan} disabled={bestBetsLoading}>
+                            SCAN AGAIN
+                          </button>
+                          {bestBetsResult.cached && <span className="micro-note">Cache window lasts 30 minutes for the same date, race type, and mode.</span>}
+                        </div>
+                      </div>
+                    )}
+                  </section>
+                )}
+
                 {dashboardTab === 'overview' && (
                   <>
                     <div className="stats-hero-grid">

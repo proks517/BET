@@ -488,6 +488,7 @@ select:focus {
 
 .terminal-line.checking { color: var(--accent-amber); }
 .terminal-line.success { color: var(--accent-green); }
+.terminal-line.failed { color: var(--accent-red); }
 
 .hero-panel h2,
 .runner-name {
@@ -736,6 +737,14 @@ select:focus {
   color: var(--accent-gold);
 }
 
+.dashboard-tab-button.best-bets-tab {
+  font-weight: 800;
+}
+
+.dashboard-tab-button.best-bets-tab.active {
+  color: #ffe29a;
+}
+
 .dashboard-tab-button.active::after {
   content: '';
   position: absolute;
@@ -779,6 +788,126 @@ select:focus {
 
 .overview-grid {
   grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.best-bets-shell {
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+}
+
+.best-bets-controls,
+.best-bets-results,
+.best-bet-card,
+.best-bet-heading-copy,
+.best-bet-submeta,
+.best-bets-actions,
+.scan-progress {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.best-bets-mode-grid {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.best-bets-button {
+  width: 100%;
+}
+
+.best-bet-submeta,
+.best-bets-actions {
+  flex-direction: row;
+  flex-wrap: wrap;
+  align-items: center;
+}
+
+.scan-progress {
+  padding: 16px;
+  border: 1px solid rgba(240, 180, 41, 0.28);
+  border-radius: var(--radius);
+  background: rgba(240, 180, 41, 0.08);
+}
+
+.best-bets-title {
+  margin: 0;
+  font-size: clamp(1.4rem, 2vw, 2rem);
+}
+
+.best-bets-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 16px;
+}
+
+.best-bet-card {
+  padding: 18px;
+  border: 1px solid rgba(45, 90, 142, 0.6);
+  border-radius: var(--radius);
+  background: rgba(9, 14, 26, 0.78);
+}
+
+.best-bet-head {
+  display: grid;
+  grid-template-columns: auto 1fr auto;
+  gap: 14px;
+  align-items: center;
+}
+
+.rank-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 46px;
+  height: 46px;
+  border-radius: 14px;
+  font-family: var(--font-mono);
+  font-weight: 800;
+  border: 1px solid var(--border);
+}
+
+.rank-badge.gold {
+  background: linear-gradient(135deg, #ffdf82, var(--accent-gold));
+  color: #2d2004;
+}
+
+.rank-badge.silver {
+  background: linear-gradient(135deg, #e2e8f0, #94a3b8);
+  color: #152030;
+}
+
+.rank-badge.bronze {
+  background: linear-gradient(135deg, #f5c79e, #c47a3f);
+  color: #281608;
+}
+
+.rank-badge.rest {
+  background: rgba(100, 116, 139, 0.18);
+  color: var(--text-primary);
+}
+
+.best-bet-meta {
+  font-size: 0.78rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--text-secondary);
+}
+
+.best-bet-runner {
+  font-size: 1.5rem;
+  font-weight: 800;
+}
+
+.best-bet-footer {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+}
+
+.quick-bet-button {
+  width: 100%;
 }
 
 .mode-mini-grid {
@@ -985,7 +1114,8 @@ select:focus {
   .compact-control-grid,
   .stats-hero-grid,
   .overview-grid,
-  .mode-mini-grid {
+  .mode-mini-grid,
+  .best-bets-grid {
     grid-template-columns: 1fr;
   }
 
@@ -994,6 +1124,10 @@ select:focus {
   }
 
   .breakdown-row {
+    grid-template-columns: 1fr;
+  }
+
+  .best-bet-head {
     grid-template-columns: 1fr;
   }
 }
