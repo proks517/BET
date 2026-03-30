@@ -212,3 +212,34 @@ describe('/api/apply-odds', () => {
     assert.ok(body.updatedPrediction.ev > 0.15)
   })
 })
+
+describe('/api/briefing', () => {
+  test('returns 200 with the expected daily briefing shape', async () => {
+    savePrediction(db, {
+      date: '2026-03-31',
+      track: 'Richmond',
+      race_number: 3,
+      race_type: 'greyhound',
+      runner: 'Briefing Dog',
+      box_barrier: 1,
+      mode: 'safest',
+      confidence: 71,
+      odds: 3.1,
+      ev: 0.12,
+    })
+
+    const response = await fetch(`${baseUrl}/api/briefing?date=2026-03-31`)
+    const body = await response.json()
+
+    assert.equal(response.status, 200)
+    assert.equal(body.date, '2026-03-31')
+    assert.ok(Array.isArray(body.todaysPredictions))
+    assert.ok(Array.isArray(body.pendingResults))
+    assert.ok(Array.isArray(body.recentForm))
+    assert.ok(body.weeklyStats)
+    assert.ok(body.allTimeStats)
+    assert.ok(body.streaks)
+    assert.ok(body.sourceHealth)
+    assert.ok(Array.isArray(body.upcomingRaces))
+  })
+})

@@ -729,6 +729,15 @@ select:focus {
 .odds-entry-shell,
 .odds-entry-panel,
 .odds-entry-table,
+.briefing-stack,
+.briefing-pill-row,
+.briefing-pending-card,
+.briefing-pending-list,
+.briefing-form-strip,
+.briefing-form-item,
+.briefing-week-grid,
+.briefing-upcoming-grid,
+.briefing-cta-card,
 .top-picks-shell,
 .top-picks-grid,
 .top-pick-heading,
@@ -741,6 +750,90 @@ select:focus {
   display: flex;
   flex-direction: column;
   gap: 14px;
+}
+
+.briefing-stack {
+  gap: 18px;
+}
+
+.briefing-pill-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+}
+
+.briefing-pending-list {
+  gap: 10px;
+}
+
+.briefing-pending-row {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  gap: 12px;
+  align-items: center;
+  padding: 10px 0;
+  border-top: 1px solid rgba(30, 58, 95, 0.35);
+}
+
+.briefing-pending-row:first-child {
+  border-top: 0;
+}
+
+.briefing-form-strip,
+.briefing-upcoming-grid,
+.briefing-week-grid {
+  display: grid;
+  gap: 14px;
+}
+
+.briefing-form-strip {
+  grid-template-columns: repeat(10, minmax(0, 1fr));
+}
+
+.briefing-form-item {
+  align-items: center;
+  text-align: center;
+}
+
+.briefing-form-caption {
+  font-size: 0.72rem;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--text-secondary);
+}
+
+.briefing-week-grid {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.briefing-upcoming-grid {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.briefing-cta-card {
+  align-items: flex-start;
+}
+
+.briefing-total-row td {
+  font-weight: 700;
+}
+
+.briefing-health-line {
+  font-family: var(--font-mono);
+  font-size: 1.2rem;
+  font-weight: 800;
+}
+
+.briefing-health-line.good {
+  color: var(--accent-green);
+}
+
+.briefing-health-line.warn {
+  color: var(--accent-amber);
+}
+
+.briefing-health-line.bad {
+  color: var(--accent-red);
 }
 
 .odds-entry-panel {
@@ -1724,7 +1817,9 @@ select:focus {
   .ai-performance-grid,
   .top-picks-grid,
   .pick-metric-grid,
-  .best-bet-metrics {
+  .best-bet-metrics,
+  .briefing-week-grid,
+  .briefing-upcoming-grid {
     grid-template-columns: 1fr;
   }
 
@@ -1755,6 +1850,14 @@ select:focus {
   }
 
   .best-bet-head {
+    grid-template-columns: 1fr;
+  }
+
+  .briefing-form-strip {
+    grid-template-columns: repeat(5, minmax(0, 1fr));
+  }
+
+  .briefing-pending-row {
     grid-template-columns: 1fr;
   }
 

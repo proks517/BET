@@ -25,6 +25,7 @@ const {
   saveJournalEntry,
   getJournalEntry,
   getJournalHistory,
+  getDailyBriefing,
 } = require('../database.js')
 
 let db
@@ -788,5 +789,230 @@ describe('prediction journal', () => {
     })
     assert.equal(history.length, 1)
     assert.equal(history[0].prediction_id, prediction.id)
+  })
+})
+
+describe('daily briefing', () => {
+  beforeEach(() => {
+    db.exec('DELETE FROM prediction_journal')
+    db.exec('DELETE FROM scraper_health')
+    db.exec('DELETE FROM predictions')
+  })
+
+  test('getDailyBriefing returns correct shape with an empty database', () => {
+    const briefing = getDailyBriefing(db, '2026-03-31')
+
+    assert.deepEqual(briefing, {
+      date: '2026-03-31',
+      todaysPredictions: [],
+      pendingResults: [],
+      recentForm: [],
+      weeklyStats: {
+        bets: 0,
+        wins: 0,
+        winRate: 0,
+        pnl: 0,
+        bestWin: null,
+        worstLoss: null,
+        weekStart: '2026-03-30',
+        weekEnd: '2026-04-05',
+      },
+      allTimeStats: {
+        bets: 0,
+        wins: 0,
+        winRate: 0,
+        pnl: 0,
+        roi: 0,
+      },
+      streaks: {
+        current: 0,
+        currentType: 'none',
+        longest: 0,
+        longestLoss: 0,
+      },
+      sourceHealth: {
+        healthySources: 0,
+        totalSources: 0,
+        lastChecked: null,
+      },
+      upcomingRaces: [],
+    })
+  })
+
+  test('getDailyBriefing todaysPredictions filters by date correctly', () => {
+    const todayPrediction = savePrediction(db, {
+      date: '2026-03-31',
+      track: 'Richmond',
+      race_number: 8,
+      race_type: 'greyhound',
+      runner: 'Today Dog',
+      box_barrier: 5,
+      mode: 'value',
+      confidence: 74,
+      odds: 4.6,
+      ev: 0.22,
+      race_grade: 'Grade 5',
+    })
+    saveJournalEntry(db, {
+      prediction_id: todayPrediction.id,
+      race_date: '2026-03-31',
+      track: 'Richmond',
+      race_number: 8,
+      race_distance: 320,
+      all_runners_json: [],
+      sources_consulted_json: [],
+      winner_name: 'Today Dog',
+      winner_box: 5,
+      winner_composite_score: 77,
+      winner_breakdown_json: {},
+      ai_analysis_json: null,
+      mode_used: 'value',
+      box_bias_source: 'default',
+      raw_data_summary: 'test',
+    })
+
+    savePrediction(db, {
+      date: '2026-03-30',
+      track: 'Wentworth Park',
+      race_number: 6,
+      race_type: 'greyhound',
+      runner: 'Yesterday Dog',
+      box_barrier: 2,
+      mode: 'safest',
+      confidence: 70,
+    })
+
+    const briefing = getDailyBriefing(db, '2026-03-31')
+
+    assert.equal(briefing.todaysPredictions.length, 1)
+    assert.deepEqual(briefing.todaysPredictions[0], {
+      id: todayPrediction.id,
+      track: 'Richmond',
+      raceNumber: 8,
+      raceType: 'greyhound',
+      pickedRunner: 'Today Dog',
+      box: 5,
+      mode: 'value',
+      compositeScore: 77,
+      confidence: 74,
+      decimalOdds: 4.6,
+      ev: 0.22,
+      result: 'pending',
+      pnl: null,
+      resolvedAutomatically: false,
+      raceGrade: 'Grade 5',
+      createdAt: todayPrediction.created_at,
+    })
+  })
+
+  test('getDailyBriefing weeklyStats calculates the Monday to Sunday window correctly', () => {
+    saveSettledPrediction({
+      date: '2026-03-30',
+      track: 'Richmond',
+      race_number: 1,
+      runner: 'Monday Win',
+      result: 'win',
+      odds: 3.5,
+    })
+    saveSettledPrediction({
+      date: '2026-04-05',
+      track: 'Wentworth Park',
+      race_number: 2,
+      runner: 'Sunday Loss',
+      result: 'loss',
+      odds: 4.0,
+    })
+    saveSettledPrediction({
+      date: '2026-03-29',
+      track: 'Sandown',
+      race_number: 3,
+      runner: 'Previous Week',
+      result: 'win',
+      odds: 2.0,
+    })
+
+    const briefing = getDailyBriefing(db, '2026-03-31')
+
+    assert.deepEqual(briefing.weeklyStats, {
+      bets: 2,
+      wins: 1,
+      winRate: 50,
+      pnl: 15,
+      bestWin: {
+        runner: 'Monday Win',
+        track: 'Richmond',
+        raceNumber: 1,
+        odds: 3.5,
+        pnl: 25,
+      },
+      worstLoss: {
+        runner: 'Sunday Loss',
+        track: 'Wentworth Park',
+        raceNumber: 2,
+        pnl: -10,
+      },
+      weekStart: '2026-03-30',
+      weekEnd: '2026-04-05',
+    })
+  })
+
+  test('getDailyBriefing pendingResults excludes the requested date', () => {
+    savePrediction(db, {
+      date: '2026-03-31',
+      track: 'Richmond',
+      race_number: 4,
+      race_type: 'greyhound',
+      runner: 'Today Pending',
+      box_barrier: 1,
+      mode: 'safest',
+      confidence: 70,
+    })
+    const priorPending = savePrediction(db, {
+      date: '2026-03-30',
+      track: 'Richmond',
+      race_number: 5,
+      race_type: 'greyhound',
+      runner: 'Past Pending',
+      box_barrier: 2,
+      mode: 'value',
+      confidence: 68,
+      odds: 4.4,
+    })
+
+    const briefing = getDailyBriefing(db, '2026-03-31')
+
+    assert.deepEqual(briefing.pendingResults, [
+      {
+        id: priorPending.id,
+        date: '2026-03-30',
+        track: 'Richmond',
+        raceNumber: 5,
+        pickedRunner: 'Past Pending',
+        mode: 'value',
+        decimalOdds: 4.4,
+      },
+    ])
+  })
+
+  test('getDailyBriefing streaks returns 0 and none when there is no settled history', () => {
+    savePrediction(db, {
+      date: '2026-03-31',
+      track: 'Richmond',
+      race_number: 1,
+      race_type: 'greyhound',
+      runner: 'Pending Only',
+      box_barrier: 1,
+      mode: 'safest',
+      confidence: 70,
+    })
+
+    const briefing = getDailyBriefing(db, '2026-03-31')
+
+    assert.deepEqual(briefing.streaks, {
+      current: 0,
+      currentType: 'none',
+      longest: 0,
+      longestLoss: 0,
+    })
   })
 })

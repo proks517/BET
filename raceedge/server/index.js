@@ -24,6 +24,7 @@ const {
   saveJournalEntry,
   getJournalEntry,
   getJournalHistory,
+  getDailyBriefing,
 } = require('./database.js')
 const {
   research,
@@ -87,6 +88,46 @@ function setCachedBestBets(key, payload) {
     cachedAt: Date.now(),
     payload,
   })
+}
+
+function getCurrentDateString() {
+  return new Intl.DateTimeFormat('en-CA', { timeZone: 'Australia/Sydney' }).format(new Date())
+}
+
+function getBriefingUpcomingRaces(date = getCurrentDateString()) {
+  const now = Date.now()
+  let latestEntry = null
+
+  for (const entry of bestBetsCache.values()) {
+    if (!entry?.payload || entry.payload.date !== date) continue
+    if ((now - entry.cachedAt) >= BEST_BETS_CACHE_TTL_MS) continue
+    if (!latestEntry || entry.cachedAt > latestEntry.cachedAt) {
+      latestEntry = entry
+    }
+  }
+
+  if (!latestEntry?.payload?.picks) return []
+
+  const modeOrder = ['safest', 'value', 'longshot']
+  return modeOrder
+    .map(mode => {
+      const pick = latestEntry.payload.picks?.[mode]?.[0]
+      if (!pick) return null
+
+      return {
+        track: pick.track,
+        raceNumber: pick.raceNumber,
+        runner: pick.runnerName,
+        box: pick.box ?? null,
+        mode,
+        ev: pick.ev ?? null,
+        decimalOdds: pick.decimalOdds ?? null,
+        estimatedStartTime: pick.estimatedStartTime ?? null,
+        raceType: latestEntry.payload.type,
+        distance: pick.distance ?? null,
+      }
+    })
+    .filter(Boolean)
 }
 
 function parseClockMinutes(value) {
@@ -727,6 +768,20 @@ app.get('/api/stats/advanced', (req, res) => {
       profitCurve: getProfitCurve(db),
     })
   } catch (err) {
+    res.status(500).json({ error: err.message })
+  }
+})
+
+// GET /api/briefing?date=YYYY-MM-DD
+app.get('/api/briefing', (req, res) => {
+  const date = req.query.date || getCurrentDateString()
+
+  try {
+    res.json(getDailyBriefing(db, date, {
+      upcomingRaces: getBriefingUpcomingRaces(date),
+    }))
+  } catch (err) {
+    console.error('[/api/briefing]', err)
     res.status(500).json({ error: err.message })
   }
 })

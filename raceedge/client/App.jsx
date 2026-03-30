@@ -31,6 +31,7 @@ const HEALTH_SOURCE_LABELS = {
 const SCRAPER_HEALTH_SOURCES = Object.keys(HEALTH_SOURCE_LABELS)
 const DASHBOARD_TABS = [
   { key: 'bestBets', label: 'BEST BETS', icon: '🎯' },
+  { key: 'briefing', label: 'BRIEFING', icon: '📋' },
   { key: 'overview', label: 'Overview', icon: '◫' },
   { key: 'predictions', label: 'Predictions', icon: '⟲' },
   { key: 'journal', label: 'Journal', icon: '✎' },
@@ -51,6 +52,41 @@ const DEFAULT_ADVANCED_STATS = {
   calibration: [],
   streaks: { current: 0, longest: 0, currentLoss: 0, longestLoss: 0 },
   profitCurve: [],
+}
+const DEFAULT_BRIEFING = {
+  date: todayStr(),
+  todaysPredictions: [],
+  pendingResults: [],
+  recentForm: [],
+  weeklyStats: {
+    bets: 0,
+    wins: 0,
+    winRate: 0,
+    pnl: 0,
+    bestWin: null,
+    worstLoss: null,
+    weekStart: null,
+    weekEnd: null,
+  },
+  allTimeStats: {
+    bets: 0,
+    wins: 0,
+    winRate: 0,
+    pnl: 0,
+    roi: 0,
+  },
+  streaks: {
+    current: 0,
+    currentType: 'none',
+    longest: 0,
+    longestLoss: 0,
+  },
+  sourceHealth: {
+    healthySources: 0,
+    totalSources: 0,
+    lastChecked: null,
+  },
+  upcomingRaces: [],
 }
 
 function todayStr() {
@@ -90,6 +126,50 @@ function formatTimestamp(value) {
     hour: '2-digit',
     minute: '2-digit',
   })
+}
+
+function formatLongDate(value) {
+  if (!value) return '—'
+  const parsed = new Date(`${value}T12:00:00`)
+  if (Number.isNaN(parsed.getTime())) return value
+  return parsed.toLocaleDateString('en-AU', {
+    weekday: 'long',
+    day: 'numeric',
+    month: 'long',
+    year: 'numeric',
+  })
+}
+
+function formatWeekRange(start, end) {
+  if (!start || !end) return '—'
+  const startDate = new Date(`${start}T12:00:00`)
+  const endDate = new Date(`${end}T12:00:00`)
+  if (Number.isNaN(startDate.getTime()) || Number.isNaN(endDate.getTime())) return '—'
+  const startLabel = startDate.toLocaleDateString('en-AU', { weekday: 'short', day: 'numeric', month: 'short' })
+  const endLabel = endDate.toLocaleDateString('en-AU', { weekday: 'short', day: 'numeric', month: 'short' })
+  return `${startLabel} — ${endLabel}`
+}
+
+function formatUpdatedAgo(value, now) {
+  if (!value) return 'Not loaded yet'
+  const diffMinutes = Math.max(0, Math.floor((now.getTime() - value.getTime()) / 60000))
+  if (diffMinutes === 0) return 'Last updated: just now'
+  if (diffMinutes === 1) return 'Last updated: 1 min ago'
+  return `Last updated: ${diffMinutes} mins ago`
+}
+
+function abbreviateTrack(track) {
+  if (!track) return '—'
+  const words = String(track).trim().split(/\s+/)
+  if (words.length === 1) return words[0].slice(0, 3).toUpperCase()
+  return words.map(word => word[0]).join('').slice(0, 3).toUpperCase()
+}
+
+function getBriefingSourceTone(summary) {
+  if (!summary?.totalSources) return 'neutral'
+  if (summary.healthySources === summary.totalSources) return 'good'
+  if (summary.healthySources >= Math.ceil(summary.totalSources / 2)) return 'warn'
+  return 'bad'
 }
 
 function getHealthTone(row) {
@@ -316,7 +396,10 @@ function App() {
   const [healthLoading, setHealthLoading] = useState(false)
   const [pendingPredictions, setPendingPredictions] = useState([])
   const [checkingResults, setCheckingResults] = useState(false)
-  const [dashboardTab, setDashboardTab] = useState('bestBets')
+  const [dashboardTab, setDashboardTab] = useState('briefing')
+  const [briefing, setBriefing] = useState(DEFAULT_BRIEFING)
+  const [briefingLoading, setBriefingLoading] = useState(false)
+  const [briefingLoadedAt, setBriefingLoadedAt] = useState(null)
   const [bestBetsDate, setBestBetsDate] = useState(todayStr())
   const [bestBetsType, setBestBetsType] = useState('greyhound')
   const [bestBetsMode, setBestBetsMode] = useState('value')
@@ -401,6 +484,37 @@ function App() {
       .finally(() => setJournalLoading(false))
   }, [])
 
+  const loadBriefing = useCallback((date = todayStr()) => {
+    setBriefingLoading(true)
+    fetch(`/api/briefing?date=${encodeURIComponent(date)}`)
+      .then(r => r.json())
+      .then(data => {
+        setBriefing({
+          ...DEFAULT_BRIEFING,
+          ...data,
+          weeklyStats: {
+            ...DEFAULT_BRIEFING.weeklyStats,
+            ...(data?.weeklyStats || {}),
+          },
+          allTimeStats: {
+            ...DEFAULT_BRIEFING.allTimeStats,
+            ...(data?.allTimeStats || {}),
+          },
+          streaks: {
+            ...DEFAULT_BRIEFING.streaks,
+            ...(data?.streaks || {}),
+          },
+          sourceHealth: {
+            ...DEFAULT_BRIEFING.sourceHealth,
+            ...(data?.sourceHealth || {}),
+          },
+        })
+        setBriefingLoadedAt(new Date())
+      })
+      .catch(() => {})
+      .finally(() => setBriefingLoading(false))
+  }, [])
+
   const closeBestBetsStream = useCallback(() => {
     if (bestBetsStreamRef.current) {
       bestBetsStreamRef.current.close()
@@ -420,6 +534,14 @@ function App() {
     loadPending()
     loadJournal()
   }, [loadStats, loadAdvancedStats, loadPredictions, loadScraperHealth, loadPending, loadJournal])
+
+  useEffect(() => {
+    if (dashboardTab !== 'briefing') return undefined
+
+    loadBriefing()
+    const intervalId = setInterval(() => loadBriefing(), 5 * 60 * 1000)
+    return () => clearInterval(intervalId)
+  }, [dashboardTab, loadBriefing])
 
   useEffect(() => {
     if (!error) return
@@ -567,6 +689,7 @@ function App() {
       loadScraperHealth()
       loadPending()
       loadJournal()
+      loadBriefing()
       setBoxBiasTrack(meeting)
       setBoxBiasDistance(distance)
     }
@@ -587,6 +710,7 @@ function App() {
       loadAdvancedStats()
       loadPredictions()
       loadPending()
+      loadBriefing()
     } catch (e) {
       setError(e.message)
     } finally {
@@ -645,6 +769,7 @@ function App() {
       })
       loadPredictions()
       loadJournal()
+      loadBriefing()
     } catch (e) {
       setError(e.message)
     } finally {
@@ -669,6 +794,7 @@ function App() {
       loadAdvancedStats()
       loadPredictions()
       loadPending()
+      loadBriefing()
     } catch (e) {
       setError(e.message)
     } finally {
@@ -677,8 +803,8 @@ function App() {
   }
 
   function handleQuickBet(pick) {
-    const selectedDate = bestBetsResult?.date || bestBetsDate
-    const selectedType = bestBetsResult?.type || bestBetsType
+    const selectedDate = pick.date || bestBetsResult?.date || briefing.date || bestBetsDate
+    const selectedType = pick.raceType || bestBetsResult?.type || bestBetsType
 
     setQuickBetTarget({
       date: selectedDate,
@@ -786,6 +912,8 @@ function App() {
         closeBestBetsStream()
         setBestBetsLoading(false)
         setBestBetsResult(payload)
+        const totalCuratedPicks = ['safest', 'value', 'longshot']
+          .reduce((sum, modeKey) => sum + (payload.picks?.[modeKey]?.length || 0), 0)
         setBestBetsProgress(current => ({
           ...current,
           racesChecked: payload.totalRacesScanned ?? current.racesChecked,
@@ -795,7 +923,7 @@ function App() {
         appendBestBetsLog(
           payload.cached
             ? `✅ Cached result loaded from ${payload.cacheAgeMinutes || 0} minute(s) ago.`
-            : `✅ Scan complete — ${payload.picks?.length || 0} picks ranked from ${payload.totalRacesScanned} races.`
+            : `✅ Scan complete — ${totalCuratedPicks} curated pick${totalCuratedPicks === 1 ? '' : 's'} from ${payload.totalRacesScanned} races.`
         )
         return
       }
@@ -913,6 +1041,19 @@ function App() {
       picks: bestBetsResult?.picks?.longshot || [],
     },
   ]
+  const briefingTodayWins = briefing.todaysPredictions.filter(prediction => prediction.result === 'win').length
+  const briefingTodayPnl = briefing.todaysPredictions.reduce((sum, prediction) => sum + (Number(prediction.pnl) || 0), 0)
+  const briefingRecentSettled = briefing.recentForm.filter(entry => entry.result === 'win' || entry.result === 'loss')
+  const briefingRecentWins = briefingRecentSettled.filter(entry => entry.result === 'win').length
+  const briefingRecentLosses = briefingRecentSettled.filter(entry => entry.result === 'loss').length
+  const briefingRecentPnl = briefing.recentForm.reduce((sum, entry) => sum + (Number(entry.pnl) || 0), 0)
+  const briefingStreakLabel = briefing.streaks.currentType === 'win'
+    ? `W${briefing.streaks.current}`
+    : briefing.streaks.currentType === 'loss'
+      ? `L${Math.abs(briefing.streaks.current)}`
+      : '—'
+  const briefingUpdatedCopy = formatUpdatedAgo(briefingLoadedAt, now)
+  const briefingSourceTone = getBriefingSourceTone(briefing.sourceHealth)
 
   return (
     <div className={`app-shell ${tracksideMode ? 'trackside-mode' : ''}`}>
@@ -1530,6 +1671,220 @@ function App() {
                       </div>
                     )}
                   </section>
+                )}
+
+                {dashboardTab === 'briefing' && (
+                  <div className="briefing-stack">
+                    <section className="dashboard-card briefing-header-card">
+                      <div className="tab-toolbar">
+                        <div>
+                          <div className="section-title">{formatLongDate(briefing.date)}</div>
+                          <div className="dashboard-copy">Daily Racing Briefing</div>
+                        </div>
+                        <div className="analytics-toolbar-actions">
+                          <span className="micro-note">{briefingUpdatedCopy}</span>
+                          <button className={`panel-button secondary ${briefingLoading ? 'loading' : ''}`} onClick={() => loadBriefing()} disabled={briefingLoading}>
+                            <span className={briefingLoading ? 'button-spinner' : ''} />
+                            <span>{briefingLoading ? 'REFRESHING...' : 'REFRESH BRIEFING'}</span>
+                          </button>
+                        </div>
+                      </div>
+
+                      <div className="briefing-pill-row">
+                        <span className="journal-meta-pill">This week: {briefing.weeklyStats.wins} wins from {briefing.weeklyStats.bets} bets ({briefing.weeklyStats.winRate}%)</span>
+                        <span className={`journal-meta-pill ${briefing.weeklyStats.pnl >= 0 ? 'positive' : 'negative'}`}>P&amp;L: {formatSignedCurrency(briefing.weeklyStats.pnl)}</span>
+                        <span className="journal-meta-pill">Streak: {briefingStreakLabel}</span>
+                      </div>
+                    </section>
+
+                    <section className="dashboard-card">
+                      <div className="section-title">Today&apos;s Predictions</div>
+
+                      {briefing.todaysPredictions.length === 0 ? (
+                        <div className="empty-state-card">No predictions made today yet. Use the race selector to research a race.</div>
+                      ) : (
+                        <div className="table-shell">
+                          <table className="health-table briefing-table">
+                            <thead>
+                              <tr>
+                                <th>Track</th>
+                                <th>Race</th>
+                                <th>Runner</th>
+                                <th>Box</th>
+                                <th>Mode</th>
+                                <th>Odds</th>
+                                <th>EV</th>
+                                <th>Result</th>
+                                <th>P&amp;L</th>
+                              </tr>
+                            </thead>
+                            <tbody>
+                              {briefing.todaysPredictions.map(prediction => (
+                                <tr key={`briefing-today-${prediction.id}`}>
+                                  <td>{prediction.track}</td>
+                                  <td>R{prediction.raceNumber}</td>
+                                  <td>{prediction.pickedRunner}</td>
+                                  <td>{prediction.box ?? '—'}</td>
+                                  <td><span className={`mode-badge ${prediction.mode}`}>{formatModeLabel(prediction.mode)}</span></td>
+                                  <td>{prediction.decimalOdds != null ? `$${prediction.decimalOdds.toFixed(2)}` : '—'}</td>
+                                  <td><span className={`edge-pill compact ${getEdgeTone(prediction.ev)}`}>{formatEdge(prediction.ev)}</span></td>
+                                  <td><span className={`status-badge ${formatPredictionResult(prediction.result)}`}>{formatPredictionResult(prediction.result).toUpperCase()}</span></td>
+                                  <td className={`pnl-cell ${prediction.pnl == null ? '' : prediction.pnl >= 0 ? 'positive' : 'negative'}`}>{prediction.pnl != null ? formatSignedCurrency(prediction.pnl) : '—'}</td>
+                                </tr>
+                              ))}
+                              <tr className="briefing-total-row">
+                                <td colSpan="6">Total: {briefing.todaysPredictions.length} bets | {briefingTodayWins} wins</td>
+                                <td colSpan="3" className={briefingTodayPnl >= 0 ? 'positive' : 'negative'}>{formatSignedCurrency(briefingTodayPnl)}</td>
+                              </tr>
+                            </tbody>
+                          </table>
+                        </div>
+                      )}
+                    </section>
+
+                    <section className="dashboard-card">
+                      <div className="tab-toolbar">
+                        <div>
+                          <div className="section-title">Pending Results</div>
+                          <div className="dashboard-copy">Past races still waiting for a recorded outcome.</div>
+                        </div>
+                        {briefing.pendingResults.length > 0 && (
+                          <span className="pending-pill active">{briefing.pendingResults.length} pending</span>
+                        )}
+                      </div>
+
+                      {briefing.pendingResults.length === 0 ? (
+                        <div className="empty-state-card">✅ All past predictions have results recorded.</div>
+                      ) : (
+                        <div className="warning-panel briefing-pending-card">
+                          <div className="briefing-pending-list">
+                            {briefing.pendingResults.map(prediction => (
+                              <div key={`briefing-pending-${prediction.id}`} className="briefing-pending-row">
+                                <span>{prediction.date}</span>
+                                <span>{prediction.track} R{prediction.raceNumber}</span>
+                                <span>{prediction.pickedRunner}</span>
+                                <span>{formatModeLabel(prediction.mode)}</span>
+                                <span>{prediction.decimalOdds != null ? `$${prediction.decimalOdds.toFixed(2)}` : '—'}</span>
+                              </div>
+                            ))}
+                          </div>
+                          <button className={`panel-button ${checkingResults ? 'loading' : ''}`} onClick={handleCheckResults} disabled={checkingResults}>
+                            <span className={checkingResults ? 'button-spinner' : ''} />
+                            <span>{checkingResults ? 'CHECKING RESULTS...' : 'CHECK RESULTS'}</span>
+                          </button>
+                        </div>
+                      )}
+                    </section>
+
+                    <section className="dashboard-card">
+                      <div className="section-title">Recent Form</div>
+                      {briefing.recentForm.length > 0 ? (
+                        <>
+                          <div className="briefing-form-strip">
+                            {briefing.recentForm.map((entry, index) => {
+                              const tone = formatPredictionResult(entry.result)
+                              return (
+                                <div className="briefing-form-item" key={`briefing-form-${entry.date}-${entry.track}-${entry.raceNumber}-${index}`}>
+                                  <span className={`result-letter-tile ${tone}`}>{tone === 'win' ? 'W' : tone === 'loss' ? 'L' : 'P'}</span>
+                                  <span className="briefing-form-caption">{abbreviateTrack(entry.track)} R{entry.raceNumber}</span>
+                                </div>
+                              )
+                            })}
+                          </div>
+                          <div className="dashboard-copy">Last 10: {briefingRecentWins}W {briefingRecentLosses}L | P&amp;L: {formatSignedCurrency(briefingRecentPnl)}</div>
+                        </>
+                      ) : (
+                        <div className="empty-state-card">No settled predictions yet to build a recent-form strip.</div>
+                      )}
+                    </section>
+
+                    <section className="dashboard-card">
+                      <div className="section-title">This Week At A Glance</div>
+                      {briefing.weeklyStats.bets > 0 ? (
+                        <>
+                          <div className="dashboard-copy">{formatWeekRange(briefing.weeklyStats.weekStart, briefing.weeklyStats.weekEnd)}</div>
+                          <div className="briefing-week-grid">
+                            <article className="mode-mini-card">
+                              <span className="mode-mini-title">Bets Made</span>
+                              <strong>{briefing.weeklyStats.bets}</strong>
+                            </article>
+                            <article className="mode-mini-card">
+                              <span className="mode-mini-title">Wins</span>
+                              <strong>{briefing.weeklyStats.wins}</strong>
+                            </article>
+                            <article className="mode-mini-card">
+                              <span className="mode-mini-title">Win Rate</span>
+                              <strong>{briefing.weeklyStats.winRate}%</strong>
+                            </article>
+                            <article className="mode-mini-card">
+                              <span className="mode-mini-title">Total P&amp;L</span>
+                              <strong className={briefing.weeklyStats.pnl >= 0 ? 'positive' : 'negative'}>{formatSignedCurrency(briefing.weeklyStats.pnl)}</strong>
+                            </article>
+                            <article className="mode-mini-card">
+                              <span className="mode-mini-title">Best Win</span>
+                              <div className="dashboard-copy">
+                                {briefing.weeklyStats.bestWin
+                                  ? `${briefing.weeklyStats.bestWin.runner} R${briefing.weeklyStats.bestWin.raceNumber} ${briefing.weeklyStats.bestWin.track} @ ${formatOdds(briefing.weeklyStats.bestWin.odds)} (${formatSignedCurrency(briefing.weeklyStats.bestWin.pnl)})`
+                                  : '—'}
+                              </div>
+                            </article>
+                            <article className="mode-mini-card">
+                              <span className="mode-mini-title">Worst Loss</span>
+                              <div className="dashboard-copy">
+                                {briefing.weeklyStats.worstLoss
+                                  ? `${briefing.weeklyStats.worstLoss.runner} R${briefing.weeklyStats.worstLoss.raceNumber} ${briefing.weeklyStats.worstLoss.track} (${formatSignedCurrency(briefing.weeklyStats.worstLoss.pnl)})`
+                                  : '—'}
+                              </div>
+                            </article>
+                          </div>
+                        </>
+                      ) : (
+                        <div className="empty-state-card">No bets recorded this week yet.</div>
+                      )}
+                    </section>
+
+                    <section className="dashboard-card">
+                      <div className="section-title">Today&apos;s Top Picks</div>
+                      {briefing.upcomingRaces.length > 0 ? (
+                        <div className="briefing-upcoming-grid">
+                          {briefing.upcomingRaces.map(pick => (
+                            <article className="best-bet-card" key={`briefing-pick-${pick.mode}-${pick.track}-${pick.raceNumber}`}>
+                              <div className="best-bet-head">
+                                <span className={`mode-badge ${pick.mode}`}>{formatModeLabel(pick.mode)}</span>
+                                <div className="best-bet-heading-copy">
+                                  <div className="best-bet-meta">{pick.track} · Race {pick.raceNumber}</div>
+                                  <div className="best-bet-runner">{pick.runner}</div>
+                                </div>
+                                {pick.box != null && <span className={`box-pill ${getBoxBadgeClass(pick.box)}`}>BOX {pick.box}</span>}
+                              </div>
+                              <div className="best-bet-metrics">
+                                <span className="meta-pill">{formatOdds(pick.decimalOdds)}</span>
+                                <span className={`edge-pill ${getEdgeTone(pick.ev)}`}>{formatEdge(pick.ev)}</span>
+                                <span className="meta-pill">{pick.estimatedStartTime || 'Time TBC'}</span>
+                              </div>
+                              <button className="panel-button quick-bet-button" onClick={() => handleQuickBet({ ...pick, date: briefing.date })}>
+                                RESEARCH THIS RACE
+                              </button>
+                            </article>
+                          ))}
+                        </div>
+                      ) : (
+                        <div className="empty-state-card briefing-cta-card">
+                          <span>Run the Best Bets scanner to see today&apos;s top picks here.</span>
+                          <button className="panel-button secondary" onClick={() => setDashboardTab('bestBets')}>OPEN BEST BETS</button>
+                        </div>
+                      )}
+                    </section>
+
+                    <section className="dashboard-card">
+                      <div className="section-title">Source Health Summary</div>
+                      <div className={`briefing-health-line ${briefingSourceTone}`}>
+                        {briefing.sourceHealth.healthySources} of {briefing.sourceHealth.totalSources} sources healthy
+                      </div>
+                      <div className="dashboard-copy">Last checked: {formatCheckedAt(briefing.sourceHealth.lastChecked)}</div>
+                      <button className="panel-button secondary" onClick={() => setDashboardTab('sourceHealth')}>VIEW DETAILS</button>
+                    </section>
+                  </div>
                 )}
 
                 {dashboardTab === 'overview' && (

@@ -623,6 +623,43 @@ function getLastTwelveMonthKeys() {
   })
 }
 
+function parseDateString(value) {
+  const match = String(value || '').match(/^(\d{4})-(\d{2})-(\d{2})$/)
+  if (!match) return null
+  const [, year, month, day] = match
+  return new Date(Date.UTC(Number(year), Number(month) - 1, Number(day), 12, 0, 0))
+}
+
+function formatUtcDateString(date) {
+  return [
+    date.getUTCFullYear(),
+    String(date.getUTCMonth() + 1).padStart(2, '0'),
+    String(date.getUTCDate()).padStart(2, '0'),
+  ].join('-')
+}
+
+function resolveBriefingDate(inputDate) {
+  const parsed = parseDateString(inputDate)
+  return parsed ? formatUtcDateString(parsed) : todayDateString()
+}
+
+function getWeekRange(dateString) {
+  const parsed = parseDateString(dateString) || parseDateString(todayDateString())
+  const dayOfWeek = parsed.getUTCDay()
+  const offsetToMonday = dayOfWeek === 0 ? -6 : 1 - dayOfWeek
+
+  const weekStart = new Date(parsed)
+  weekStart.setUTCDate(parsed.getUTCDate() + offsetToMonday)
+
+  const weekEnd = new Date(weekStart)
+  weekEnd.setUTCDate(weekStart.getUTCDate() + 6)
+
+  return {
+    start: formatUtcDateString(weekStart),
+    end: formatUtcDateString(weekEnd),
+  }
+}
+
 function getStatsByMonth(db) {
   const rows = getResolvedPredictions(db)
   const months = getLastTwelveMonthKeys()
@@ -964,6 +1001,153 @@ function getJournalHistory(db, limit = 20) {
   return rows.map(parseJournalRow)
 }
 
+function getDailyBriefing(db, date = todayDateString(), { upcomingRaces = [] } = {}) {
+  const briefingDate = resolveBriefingDate(date)
+  const { start: weekStart, end: weekEnd } = getWeekRange(briefingDate)
+  const predictions = db.prepare(`
+    SELECT *
+    FROM predictions
+    ORDER BY date DESC, race_number DESC, id DESC
+  `).all().map(parsePredictionRow)
+
+  const latestJournalRows = db.prepare(`
+    SELECT prediction_id, winner_composite_score
+    FROM prediction_journal
+    ORDER BY id DESC
+  `).all()
+  const compositeScoreByPredictionId = new Map()
+  for (const row of latestJournalRows) {
+    if (!compositeScoreByPredictionId.has(row.prediction_id)) {
+      compositeScoreByPredictionId.set(row.prediction_id, Number(row.winner_composite_score))
+    }
+  }
+
+  const settledPredictions = predictions.filter(prediction => prediction.result && prediction.result !== 'pending')
+  const todaysPredictions = predictions
+    .filter(prediction => prediction.date === briefingDate)
+    .sort((left, right) => String(right.created_at).localeCompare(String(left.created_at)) || (right.id - left.id))
+    .map(prediction => ({
+      id: prediction.id,
+      track: prediction.track,
+      raceNumber: prediction.race_number,
+      raceType: prediction.race_type,
+      pickedRunner: prediction.runner,
+      box: prediction.box_barrier,
+      mode: prediction.mode,
+      compositeScore: compositeScoreByPredictionId.get(prediction.id) ?? null,
+      confidence: prediction.confidence,
+      decimalOdds: prediction.odds,
+      ev: prediction.ev,
+      result: prediction.result,
+      pnl: prediction.pnl,
+      resolvedAutomatically: prediction.resolved_automatically,
+      raceGrade: prediction.race_grade,
+      createdAt: prediction.created_at,
+    }))
+
+  const pendingResults = predictions
+    .filter(prediction => prediction.date < briefingDate && (!prediction.result || prediction.result === 'pending'))
+    .sort((left, right) => String(right.date).localeCompare(String(left.date)) || (right.race_number - left.race_number) || (right.id - left.id))
+    .map(prediction => ({
+      id: prediction.id,
+      date: prediction.date,
+      track: prediction.track,
+      raceNumber: prediction.race_number,
+      pickedRunner: prediction.runner,
+      mode: prediction.mode,
+      decimalOdds: prediction.odds,
+    }))
+
+  const recentForm = settledPredictions
+    .slice()
+    .sort((left, right) => String(right.date).localeCompare(String(left.date)) || (right.id - left.id))
+    .slice(0, 10)
+    .map(prediction => ({
+      date: prediction.date,
+      track: prediction.track,
+      raceNumber: prediction.race_number,
+      pickedRunner: prediction.runner,
+      result: prediction.result,
+      pnl: prediction.pnl,
+      decimalOdds: prediction.odds,
+    }))
+
+  const weeklySettled = settledPredictions.filter(prediction => prediction.date >= weekStart && prediction.date <= weekEnd)
+  const weeklyWins = weeklySettled.filter(prediction => prediction.result === 'win')
+  const weeklyPnl = roundCurrency(weeklySettled.reduce((sum, prediction) => sum + (prediction.pnl ?? 0), 0))
+  const weeklyBestWinSource = weeklyWins.reduce((best, prediction) => (
+    best == null || (prediction.pnl ?? 0) > (best.pnl ?? 0) ? prediction : best
+  ), null)
+  const weeklyWorstLossSource = weeklySettled
+    .filter(prediction => prediction.result === 'loss')
+    .reduce((worst, prediction) => (
+      worst == null || (prediction.pnl ?? 0) < (worst.pnl ?? 0) ? prediction : worst
+    ), null)
+
+  const allTimeWins = settledPredictions.filter(prediction => prediction.result === 'win')
+  const allTimePnl = roundCurrency(settledPredictions.reduce((sum, prediction) => sum + (prediction.pnl ?? 0), 0))
+  const allTimeStaked = settledPredictions.reduce((sum, prediction) => sum + (prediction.stake ?? 0), 0)
+
+  const streakData = getStreakData(db)
+  const scraperHealthRows = getScraperStats(db)
+  const lastChecked = scraperHealthRows.reduce((latest, row) => {
+    if (!row.last_checked) return latest
+    if (!latest) return row.last_checked
+    return String(row.last_checked).localeCompare(String(latest)) > 0 ? row.last_checked : latest
+  }, null)
+
+  return {
+    date: briefingDate,
+    todaysPredictions,
+    pendingResults,
+    recentForm,
+    weeklyStats: {
+      bets: weeklySettled.length,
+      wins: weeklyWins.length,
+      winRate: calculateWinRate(weeklyWins.length, weeklySettled.length),
+      pnl: weeklyPnl,
+      bestWin: weeklyBestWinSource
+        ? {
+          runner: weeklyBestWinSource.runner,
+          track: weeklyBestWinSource.track,
+          raceNumber: weeklyBestWinSource.race_number,
+          odds: weeklyBestWinSource.odds,
+          pnl: weeklyBestWinSource.pnl,
+        }
+        : null,
+      worstLoss: weeklyWorstLossSource
+        ? {
+          runner: weeklyWorstLossSource.runner,
+          track: weeklyWorstLossSource.track,
+          raceNumber: weeklyWorstLossSource.race_number,
+          pnl: weeklyWorstLossSource.pnl,
+        }
+        : null,
+      weekStart,
+      weekEnd,
+    },
+    allTimeStats: {
+      bets: settledPredictions.length,
+      wins: allTimeWins.length,
+      winRate: calculateWinRate(allTimeWins.length, settledPredictions.length),
+      pnl: allTimePnl,
+      roi: allTimeStaked > 0 ? roundTo((allTimePnl / allTimeStaked) * 100, 1) : 0,
+    },
+    streaks: {
+      current: streakData.current > 0 ? streakData.current : streakData.currentLoss > 0 ? -streakData.currentLoss : 0,
+      currentType: streakData.current > 0 ? 'win' : streakData.currentLoss > 0 ? 'loss' : 'none',
+      longest: streakData.longest,
+      longestLoss: streakData.longestLoss,
+    },
+    sourceHealth: {
+      healthySources: scraperHealthRows.filter(row => Number(row.success_rate_pct) >= 70).length,
+      totalSources: scraperHealthRows.length,
+      lastChecked,
+    },
+    upcomingRaces: Array.isArray(upcomingRaces) ? upcomingRaces : [],
+  }
+}
+
 module.exports = {
   initDb,
   getPrediction,
@@ -989,4 +1173,5 @@ module.exports = {
   saveJournalEntry,
   getJournalEntry,
   getJournalHistory,
+  getDailyBriefing,
 }
