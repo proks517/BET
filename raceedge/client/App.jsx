@@ -30,10 +30,18 @@ const HEALTH_SOURCE_LABELS = {
 
 const SCRAPER_HEALTH_SOURCES = Object.keys(HEALTH_SOURCE_LABELS)
 const DASHBOARD_TABS = [
-  { key: 'overview', label: 'Overview' },
-  { key: 'boxBias', label: 'Box Bias' },
-  { key: 'journal', label: 'Journal' },
+  { key: 'overview', label: 'Overview', icon: '◫' },
+  { key: 'predictions', label: 'Predictions', icon: '⟲' },
+  { key: 'journal', label: 'Journal', icon: '✎' },
+  { key: 'boxBias', label: 'Box Bias', icon: '◎' },
+  { key: 'sourceHealth', label: 'Source Health', icon: '◉' },
 ]
+const MODE_CARDS = [
+  { key: 'safest', label: 'SAFEST', icon: '🛡', accent: 'blue' },
+  { key: 'value', label: 'VALUE', icon: '🎯', accent: 'gold' },
+  { key: 'longshot', label: 'LONGSHOT', icon: '⚡', accent: 'red' },
+]
+const RACE_NUMBERS = Array.from({ length: 12 }, (_, index) => index + 1)
 
 function todayStr() {
   return new Date().toLocaleDateString('en-CA') // YYYY-MM-DD in local time
@@ -47,6 +55,18 @@ function truncateText(text, maxLength = 60) {
 function formatCheckedAt(value) {
   if (!value) return 'Never'
   return new Date(`${value.replace(' ', 'T')}Z`).toLocaleString()
+}
+
+function formatClock(value) {
+  return value.toLocaleString('en-AU', {
+    weekday: 'short',
+    day: '2-digit',
+    month: 'short',
+    year: 'numeric',
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+  })
 }
 
 function getHealthTone(row) {
@@ -66,6 +86,14 @@ function getBoxBiasTone(winRate) {
   if (winRate > 30) return 'good'
   if (winRate >= 15) return 'warn'
   return 'bad'
+}
+
+function getResultTone(result) {
+  const status = formatPredictionResult(result)
+  if (status === 'win') return 'good'
+  if (status === 'loss') return 'bad'
+  if (status === 'scratched') return 'muted'
+  return 'warn'
 }
 
 function formatModeLabel(mode) {
@@ -98,6 +126,50 @@ function mergeScraperHealthRows(rows = []) {
   return [...knownRows, ...extraRows]
 }
 
+function getBoxBadgeClass(box) {
+  const value = Number(box)
+  if (!Number.isFinite(value) || value < 1 || value > 8) return 'box-badge-neutral'
+  return `box-badge-${value}`
+}
+
+function computeCurrentStreak(predictions = []) {
+  const settled = predictions.filter(prediction => ['win', 'loss'].includes(formatPredictionResult(prediction.result)))
+  if (settled.length === 0) return { label: '—', tone: 'neutral' }
+
+  const ordered = [...settled].sort((left, right) => right.id - left.id)
+  const streakResult = formatPredictionResult(ordered[0].result)
+  let count = 0
+
+  for (const prediction of ordered) {
+    if (formatPredictionResult(prediction.result) !== streakResult) break
+    count += 1
+  }
+
+  return {
+    label: `${streakResult === 'win' ? 'W' : 'L'}${count}`,
+    tone: streakResult === 'win' ? 'good' : 'bad',
+  }
+}
+
+function sortPredictions(rows, sort) {
+  const direction = sort.direction === 'asc' ? 1 : -1
+
+  return [...rows].sort((left, right) => {
+    const leftValue = left[sort.key]
+    const rightValue = right[sort.key]
+
+    if (leftValue == null && rightValue == null) return 0
+    if (leftValue == null) return 1
+    if (rightValue == null) return -1
+
+    if (typeof leftValue === 'number' && typeof rightValue === 'number') {
+      return (leftValue - rightValue) * direction
+    }
+
+    return String(leftValue).localeCompare(String(rightValue)) * direction
+  })
+}
+
 function App() {
   // Controls
   const [date,       setDate]       = useState(todayStr())
@@ -116,7 +188,11 @@ function App() {
   const [result,     setResult]     = useState(null)
   const [error,      setError]      = useState('')
   const [notice,     setNotice]     = useState(null)
-  const [theme,      setTheme]      = useState(() => localStorage.getItem('raceedge-theme') || 'dark')
+  const [now,        setNow]        = useState(() => new Date())
+  const [serverConnected, setServerConnected] = useState(false)
+  const [tracksideMode, setTracksideMode] = useState(() => (
+    typeof window !== 'undefined' ? window.innerWidth < 480 : false
+  ))
 
   // Record result
   const [odds,       setOdds]       = useState('')
@@ -125,6 +201,8 @@ function App() {
 
   // Stats
   const [stats,      setStats]      = useState(null)
+  const [predictions, setPredictions] = useState([])
+  const [predictionSort, setPredictionSort] = useState({ key: 'date', direction: 'desc' })
   const [scraperHealth, setScraperHealth] = useState(() => mergeScraperHealthRows())
   const [healthLoading, setHealthLoading] = useState(false)
   const [pendingPredictions, setPendingPredictions] = useState([])
@@ -140,6 +218,13 @@ function App() {
 
   const loadStats = useCallback(() => {
     fetch('/api/stats').then(r => r.json()).then(setStats).catch(() => {})
+  }, [])
+
+  const loadPredictions = useCallback(() => {
+    fetch('/api/predictions')
+      .then(r => r.json())
+      .then(data => setPredictions(data.predictions || []))
+      .catch(() => {})
   }, [])
 
   const loadScraperHealth = useCallback(() => {
@@ -179,15 +264,11 @@ function App() {
 
   useEffect(() => {
     loadStats()
+    loadPredictions()
     loadScraperHealth()
     loadPending()
     loadJournal()
-  }, [loadStats, loadScraperHealth, loadPending, loadJournal])
-
-  useEffect(() => {
-    document.documentElement.setAttribute('data-theme', theme)
-    localStorage.setItem('raceedge-theme', theme)
-  }, [theme])
+  }, [loadStats, loadPredictions, loadScraperHealth, loadPending, loadJournal])
 
   useEffect(() => {
     if (!error) return
@@ -206,6 +287,37 @@ function App() {
       ? `${result.runner} — RaceEdge`
       : 'RaceEdge — Racing Research & Predictions'
   }, [result])
+
+  useEffect(() => {
+    const intervalId = setInterval(() => setNow(new Date()), 1000)
+    return () => clearInterval(intervalId)
+  }, [])
+
+  useEffect(() => {
+    async function pingServer() {
+      try {
+        const response = await fetch('/api/health')
+        setServerConnected(response.ok)
+      } catch {
+        setServerConnected(false)
+      }
+    }
+
+    pingServer()
+    const intervalId = setInterval(pingServer, 15000)
+    return () => clearInterval(intervalId)
+  }, [])
+
+  useEffect(() => {
+    function handleResize() {
+      if (window.innerWidth < 480) {
+        setTracksideMode(true)
+      }
+    }
+
+    window.addEventListener('resize', handleResize)
+    return () => window.removeEventListener('resize', handleResize)
+  }, [])
 
   useEffect(() => {
     if (!date) return
@@ -263,6 +375,8 @@ function App() {
       setLoading(false)
       setLoadMsg('')
       setActiveSourceIdx(-1)
+      loadStats()
+      loadPredictions()
       loadScraperHealth()
       loadPending()
       loadJournal()
@@ -283,6 +397,7 @@ function App() {
       if (!res.ok) throw new Error('Failed to record result')
       setRecorded(true)
       loadStats()
+      loadPredictions()
       loadPending()
     } catch (e) {
       setError(e.message)
@@ -305,6 +420,7 @@ function App() {
       })
 
       loadStats()
+      loadPredictions()
       loadPending()
     } catch (e) {
       setError(e.message)
@@ -313,509 +429,646 @@ function App() {
     }
   }
 
+  function togglePredictionSort(key) {
+    setPredictionSort(current => ({
+      key,
+      direction: current.key === key && current.direction === 'asc' ? 'desc' : 'asc',
+    }))
+  }
+
+  const streak = computeCurrentStreak(predictions)
+  const sortedPredictions = sortPredictions(predictions, predictionSort)
+  const recentResultSquares = [...predictions].sort((left, right) => right.id - left.id).slice(0, 10)
+  const modePerformance = ['safest', 'value', 'longshot'].map(modeKey => (
+    stats?.by_mode?.find(row => row.mode === modeKey) || { mode: modeKey, total: 0, wins: 0, win_rate: 0 }
+  ))
+  const boxBiasRows = Array.from({ length: 8 }, (_, index) => {
+    const box = index + 1
+    return boxBiasData.boxes?.find(entry => Number(entry.box) === box) || {
+      box,
+      total_predictions: 0,
+      win_count: 0,
+      win_rate_pct: 0,
+    }
+  })
+  const sourceRows = result
+    ? SOURCES[raceType].map(sourceName => {
+        const skipped = result.sourcesSkipped?.find(source => source.source === sourceName)
+        const healthRow = scraperHealth.find(row => (row.display_name || row.source_name) === sourceName)
+        return {
+          sourceName,
+          status: result.sourcesUsed?.includes(sourceName)
+            ? 'success'
+            : skipped
+              ? 'failed'
+              : 'idle',
+          hoverCopy: healthRow?.average_response_time_ms != null
+            ? `Avg response ${healthRow.average_response_time_ms}ms`
+            : skipped?.reason || 'No recent timing data',
+        }
+      })
+    : []
+
   return (
-    <div className="app">
-      <div className="app-header">
-        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-          <div>
-            <h1>RaceEdge</h1>
-            <div className="subtitle">Australian Racing Research &amp; Prediction Tracker</div>
+    <div className={`app-shell ${tracksideMode ? 'trackside-mode' : ''}`}>
+      <header className="topbar">
+        <div className="brand-block">
+          <div className="brand-mark">🏁 RACEEDGE</div>
+          <div className="brand-subtitle">Australian Racing Research &amp; Prediction Tracker</div>
+        </div>
+        <div className="topbar-meta">
+          <div className={`live-chip ${serverConnected ? 'online' : 'offline'}`}>
+            <span className="live-dot" />
+            <span>{serverConnected ? 'LIVE' : 'OFFLINE'}</span>
           </div>
-          <button className="theme-toggle" onClick={() => setTheme(t => t === 'dark' ? 'light' : 'dark')}>
-            {theme === 'dark' ? 'Light' : 'Dark'}
+          <button className={`trackside-toggle ${tracksideMode ? 'active' : ''}`} onClick={() => setTracksideMode(current => !current)}>
+            📱 TRACKSIDE
           </button>
-        </div>
-      </div>
-
-      {/* ── Controls ─────────────────────────────────────── */}
-      <div className="panel">
-        <h2>Research a Race</h2>
-
-        <div className="controls-grid">
-          <label>
-            Date
-            <input type="date" value={date} onChange={e => setDate(e.target.value)} />
-          </label>
-
-          <label>
-            Race Type
-            <div className="toggle-group">
-              <button className={`toggle-btn ${raceType === 'greyhound' ? 'active' : ''}`} onClick={() => setRaceType('greyhound')}>🐕 Greyhounds</button>
-              <button className={`toggle-btn ${raceType === 'horse'     ? 'active' : ''}`} onClick={() => setRaceType('horse')}>🐎 Horses</button>
-            </div>
-          </label>
-
-          <label>
-            Meeting
-            <select value={meeting} onChange={e => setMeeting(e.target.value)} disabled={!meetings.length}>
-              {!meetings.length
-                ? <option>Loading…</option>
-                : meetings.map(m => <option key={m} value={m}>{m}</option>)
-              }
-            </select>
-          </label>
-
-          <label>
-            Race #
-            <select value={raceNum} onChange={e => setRaceNum(Number(e.target.value))}>
-              {Array.from({ length: 12 }, (_, i) => i + 1).map(n =>
-                <option key={n} value={n}>Race {n}</option>
-              )}
-            </select>
-          </label>
-
-          <label>
-            Distance (m)
-            <input type="number" min="100" step="10" value={distance} onChange={e => setDistance(Number(e.target.value) || 0)} />
-          </label>
-
-          <label>
-            Stake ($)
-            <input type="number" min="1" step="1" value={stake}
-              onChange={e => { const v = parseFloat(e.target.value) || 10; setStake(v); localStorage.setItem('raceedge-stake', String(v)) }} />
-          </label>
-        </div>
-
-        <label style={{ marginBottom: 16 }}>
-          Prediction Mode
-          <div className="mode-group">
-            {[
-              { key: 'safest',   label: '✅ Safest Bet'  },
-              { key: 'value',    label: '💰 Best Value'  },
-              { key: 'longshot', label: '🎲 Long Shot'   },
-            ].map(({ key, label }) => (
-              <button key={key} className={`mode-btn ${mode === key ? 'active ' + key : ''}`} onClick={() => setMode(key)}>
-                {label}
-              </button>
-            ))}
+          <div className="clock-block">
+            <span className="clock-label">Sydney Time</span>
+            <strong className="clock-value">{formatClock(now)}</strong>
           </div>
-        </label>
-
-        <button className="btn-primary" onClick={handleResearch} disabled={loading || !meeting}>
-          {loading ? 'Researching…' : '🔍 Research & Pick'}
-        </button>
-
-        {loading && (
-          <div className="loading-sources">
-            {SOURCES[raceType].map((src, i) => (
-              <div className={`source-item ${i < activeSourceIdx ? 'done' : i === activeSourceIdx ? 'active' : 'pending'}`} key={src}>
-                <div className={i < activeSourceIdx ? 'check-icon' : i === activeSourceIdx ? 'spinner' : 'dot'} />
-                <span>{src}</span>
-              </div>
-            ))}
-            <div className="loading-msg">{loadMsg}</div>
-          </div>
-        )}
-      </div>
+        </div>
+      </header>
 
       {error && (
-        <div className="error-toast">
-          <span>Warning: {error}</span>
-          <button className="error-dismiss" onClick={() => setError('')}>Dismiss</button>
+        <div className="toast toast-error">
+          <span>{error}</span>
+          <button className="toast-dismiss" onClick={() => setError('')}>Dismiss</button>
         </div>
       )}
 
       {notice && (
-        <div className={`notice-toast ${notice.kind || 'info'}`}>
+        <div className="toast toast-success">
           <span>{notice.message}</span>
-          <button className="error-dismiss" onClick={() => setNotice(null)}>Dismiss</button>
+          <button className="toast-dismiss" onClick={() => setNotice(null)}>Dismiss</button>
         </div>
       )}
 
-      {/* ── Result ───────────────────────────────────────── */}
-      {result && !loading && (
-        <div className="panel">
-          <h2>Recommendation</h2>
+      <div className="app-layout">
+        <aside className="sidebar">
+          <div className="sidebar-card selector-card">
+            <div className="section-title">Race Selector</div>
 
-          <div className="result-card">
-            <div className="runner-name">{result.runner}</div>
-            <div className="runner-meta">
-              {result.box     && `Box ${result.box} · `}
-              {result.barrier && `Barrier ${result.barrier} · `}
-              {result.distance && `${result.distance}m · `}
-              {result.odds    && `$${result.odds.toFixed(2)} · `}
-              {mode.charAt(0).toUpperCase() + mode.slice(1)} mode
-            </div>
+            <div className="selector-stack">
+              <label>
+                Date
+                <input type="date" value={date} onChange={e => setDate(e.target.value)} />
+              </label>
 
-            <div className="confidence-wrap">
-              <div className="confidence-label">Confidence: {result.confidence}%</div>
-              <div className="confidence-bar">
-                <div className="confidence-fill" style={{ width: `${result.confidence}%` }} />
-              </div>
-            </div>
-
-            <div className="reasoning">{result.reasoning}</div>
-          </div>
-
-          {result.breakdown && (
-            <div className="score-breakdown">
-              <div className="breakdown-heading">Score Breakdown</div>
-              <div className="breakdown-list">
-                {SCORE_FACTORS.map(factor => {
-                  const score = result.breakdown[factor.key] ?? 0
-                  return (
-                    <div className="breakdown-item" key={factor.key}>
-                      <div className="breakdown-meta">
-                        <span>{factor.label}</span>
-                        <span>{factor.weight} · {score}</span>
-                      </div>
-                      <div className="breakdown-track">
-                        <div
-                          className={`breakdown-fill ${getFactorTone(score)}`}
-                          style={{ width: `${score}%` }}
-                        />
-                      </div>
-                    </div>
-                  )
-                })}
-              </div>
-            </div>
-          )}
-
-          {result.allScores?.length > 0 && (
-            <div style={{ marginBottom: 14 }}>
-              <div style={{ fontSize: '0.8rem', color: '#64748b', marginBottom: 6 }}>All runners scored:</div>
-              <table className="scores-table">
-                <thead><tr><th>#</th><th>Runner</th><th>Score</th><th>Odds</th></tr></thead>
-                <tbody>
-                  {result.allScores.map((s, i) => (
-                    <tr key={s.name} className={s.name === result.runner ? 'sel' : ''}>
-                      <td>{i + 1}</td>
-                      <td>{s.name}</td>
-                      <td>{s.score}</td>
-                      <td>{s.odds ? `$${s.odds.toFixed(2)}` : '—'}</td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          )}
-
-          <div style={{ marginBottom: 14 }}>
-            <div style={{ fontSize: '0.8rem', color: '#64748b', marginBottom: 6 }}>Sources:</div>
-            <div className="sources-row">
-              {result.sourcesUsed?.map(s    => <span key={s}         className="src-tag ok"  title="data received">✓ {s}</span>)}
-              {result.sourcesSkipped?.map(s => <span key={s.source}  className="src-tag err" title={s.reason}>✗ {s.source}</span>)}
-            </div>
-            {result.boxBiasSource && <div className="bias-note">Box bias source: {result.boxBiasSource}</div>}
-            {result.warning && <div className="warning-box">⚠️ {result.warning}</div>}
-          </div>
-
-          {!recorded ? (
-            <div>
-              <div style={{ fontSize: '0.8rem', color: '#64748b', marginBottom: 8 }}>Record outcome:</div>
-              <div className="record-row">
-                <div className="odds-input-wrap">
-                  <span>Odds $</span>
-                  <input
-                    type="number" step="0.05" min="1"
-                    placeholder={result.odds?.toFixed(2) ?? '2.50'}
-                    value={odds}
-                    onChange={e => setOdds(e.target.value)}
-                  />
-                </div>
-                <button className="result-btn win"       onClick={() => handleRecord('win')}       disabled={recording}>✓ Win</button>
-                <button className="result-btn loss"      onClick={() => handleRecord('loss')}      disabled={recording}>✗ Loss</button>
-                <button className="result-btn scratched" onClick={() => handleRecord('scratched')} disabled={recording}>— Scratched</button>
-              </div>
-            </div>
-          ) : (
-            <div className="recorded-msg">✓ Result recorded</div>
-          )}
-        </div>
-      )}
-
-      {/* ── Stats Dashboard ───────────────────────────────── */}
-      {stats && (
-        <div className="panel">
-          <h2>Stats Dashboard</h2>
-
-          <div className="dashboard-tabs">
-            {DASHBOARD_TABS.map(tab => (
-              <button
-                key={tab.key}
-                className={`dashboard-tab ${dashboardTab === tab.key ? 'active' : ''}`}
-                onClick={() => setDashboardTab(tab.key)}
-              >
-                {tab.label}
-                {tab.key === 'overview' && pendingPredictions.length > 0 && (
-                  <span className="dashboard-tab-badge">{pendingPredictions.length}</span>
-                )}
-              </button>
-            ))}
-          </div>
-
-          {dashboardTab === 'overview' && (
-            <>
-              <div className="stats-grid">
-                <div className="stat-card">
-                  <div className="stat-value">{stats.overall_win_rate}%</div>
-                  <div className="stat-label">Overall Win Rate</div>
-                </div>
-                <div className="stat-card">
-                  <div className={`stat-value ${stats.total_pnl >= 0 ? 'pnl-pos' : 'pnl-neg'}`}>
-                    {stats.total_pnl >= 0 ? '+' : ''}${stats.total_pnl.toFixed(2)}
-                  </div>
-                  <div className="stat-label">Total P&amp;L</div>
-                </div>
-                {stats.by_mode?.map(m => (
-                  <div key={m.mode} className="stat-card">
-                    <div className="stat-value">{m.win_rate}%</div>
-                    <div className="stat-label">{formatModeLabel(m.mode)} ({m.total} bets)</div>
-                  </div>
-                ))}
-                {stats.by_type?.map(t => (
-                  <div key={t.race_type} className="stat-card">
-                    <div className="stat-value">{t.win_rate}%</div>
-                    <div className="stat-label">{t.race_type === 'greyhound' ? '🐕' : '🐎'} {t.race_type} ({t.total})</div>
-                  </div>
-                ))}
-              </div>
-
-              <div className="panel-toolbar result-check-toolbar">
-                <div>
-                  <div className="subsection-title">Result Checker</div>
-                  <div className="subsection-copy">Past unresolved predictions waiting for automatic race outcomes</div>
-                </div>
-                <div className="toolbar-actions">
-                  <span className={`pending-pill ${pendingPredictions.length > 0 ? 'active' : ''}`}>
-                    Pending {pendingPredictions.length}
-                  </span>
-                  <button className="refresh-btn" onClick={handleCheckResults} disabled={checkingResults}>
-                    {checkingResults ? 'Checking...' : 'Check Results'}
+              <div>
+                <div className="control-label">Race Type</div>
+                <div className="race-type-toggle">
+                  <button className={`race-type-button ${raceType === 'greyhound' ? 'active' : ''}`} onClick={() => setRaceType('greyhound')}>
+                    🐕 GREYHOUNDS
+                  </button>
+                  <button className={`race-type-button ${raceType === 'horse' ? 'active' : ''}`} onClick={() => setRaceType('horse')}>
+                    🐎 HORSES
                   </button>
                 </div>
               </div>
 
-              <div className="panel-toolbar">
-                <div>
-                  <div className="subsection-title">Source Health</div>
-                  <div className="subsection-copy">Last 7 days of scraper performance</div>
+              <label>
+                Meeting
+                <select value={meeting} onChange={e => setMeeting(e.target.value)} disabled={!meetings.length}>
+                  {!meetings.length
+                    ? <option>Loading…</option>
+                    : meetings.map(m => <option key={m} value={m}>{m}</option>)}
+                </select>
+              </label>
+
+              <div>
+                <div className="control-label">Race Number</div>
+                <div className="race-number-grid">
+                  {RACE_NUMBERS.map(number => (
+                    <button
+                      key={number}
+                      className={`race-number-button ${raceNum === number ? 'active' : ''}`}
+                      onClick={() => setRaceNum(number)}
+                    >
+                      {number}
+                    </button>
+                  ))}
                 </div>
-                <button className="refresh-btn" onClick={loadScraperHealth} disabled={healthLoading}>
-                  {healthLoading ? 'Refreshing...' : 'Refresh'}
-                </button>
               </div>
 
-              <div className="health-table-wrap">
-                <table className="health-table">
-                  <thead>
-                    <tr>
-                      <th>Source</th>
-                      <th>7-day success rate</th>
-                      <th>Avg response</th>
-                      <th>Last error</th>
-                      <th>Last checked</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {scraperHealth.map(row => (
-                      <tr key={row.source_name}>
-                        <td>{row.display_name || HEALTH_SOURCE_LABELS[row.source_name] || row.source_name}</td>
-                        <td>
-                          <span className={`health-rate ${getHealthTone(row)}`}>
-                            {row.total_attempts ? `${row.success_rate_pct}%` : '—'}
-                          </span>
-                        </td>
-                        <td>{row.average_response_time_ms != null ? `${row.average_response_time_ms} ms` : '—'}</td>
-                        <td title={row.last_seen_error || 'No recent errors'}>{truncateText(row.last_seen_error)}</td>
-                        <td>{formatCheckedAt(row.last_checked)}</td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
+              <label>
+                Distance (m)
+                <input type="number" min="100" step="10" value={distance} onChange={e => setDistance(Number(e.target.value) || 0)} />
+              </label>
+
+              <label>
+                Stake ($)
+                <input
+                  type="number"
+                  min="1"
+                  step="1"
+                  value={stake}
+                  onChange={e => {
+                    const nextStake = parseFloat(e.target.value) || 10
+                    setStake(nextStake)
+                    localStorage.setItem('raceedge-stake', String(nextStake))
+                  }}
+                />
+              </label>
+
+              <div>
+                <div className="control-label">Prediction Mode</div>
+                <div className="mode-card-grid">
+                  {MODE_CARDS.map(card => (
+                    <button
+                      key={card.key}
+                      className={`mode-card ${card.accent} ${mode === card.key ? 'active' : ''}`}
+                      onClick={() => setMode(card.key)}
+                    >
+                      <span className="mode-icon">{card.icon}</span>
+                      <span className="mode-title">{card.label}</span>
+                    </button>
+                  ))}
+                </div>
               </div>
 
-              {stats.last10?.length > 0 && (
-                <>
-                  <div style={{ fontSize: '0.8rem', color: '#64748b', marginBottom: 8 }}>Last 10 predictions</div>
-                  <div style={{ overflowX: 'auto' }}>
-                    <table className="preds-table">
+              <button className={`research-button ${loading ? 'loading' : ''}`} onClick={handleResearch} disabled={loading || !meeting}>
+                <span className={loading ? 'button-spinner' : ''} />
+                <span>{loading ? 'RESEARCHING...' : 'RESEARCH & PICK'}</span>
+              </button>
+
+              {loading && (
+                <div className="terminal-panel">
+                  <div className="section-title">Source Feed</div>
+                  <div className="terminal-lines">
+                    {SOURCES[raceType]
+                      .slice(0, Math.min(activeSourceIdx + 1, SOURCES[raceType].length))
+                      .map((sourceName, index) => {
+                        const isCurrent = index === activeSourceIdx && activeSourceIdx < SOURCES[raceType].length
+                        return (
+                          <div key={sourceName} className={`terminal-line ${isCurrent ? 'checking' : 'success'}`}>
+                            {isCurrent ? `⏳ Checking ${sourceName}...` : `✅ ${sourceName} — source checked`}
+                          </div>
+                        )
+                      })}
+                  </div>
+                  {loadMsg && <div className="terminal-status">{loadMsg}</div>}
+                </div>
+              )}
+            </div>
+          </div>
+        </aside>
+
+        <main className="main-content">
+
+          {!result && !loading && !tracksideMode && (
+            <section className="hero-panel">
+              <div className="section-eyebrow">Market Console</div>
+              <h2>Research a meeting to surface your top pick, factor breakdown, and full race dashboard.</h2>
+              <p>RaceEdge now runs like a dark broadcast desk: live status, source monitoring, journal history, and race-ready trackside mode.</p>
+            </section>
+          )}
+
+          {result && !loading && (
+            <div className={`results-panel ${tracksideMode ? 'trackside' : ''}`}>
+              <section className={`top-pick-card ${tracksideMode ? 'trackside' : ''}`}>
+                <div className="section-eyebrow">Top Pick</div>
+                <div className="top-pick-head">
+                  <div>
+                    <div className="runner-name">{result.runner}</div>
+                    <div className="runner-meta">
+                      {result.box && <span className={`box-pill ${getBoxBadgeClass(result.box)}`}>BOX {result.box}</span>}
+                      {result.barrier && <span className="meta-pill">Barrier {result.barrier}</span>}
+                      {result.distance && <span className="meta-pill">{result.distance}m</span>}
+                      {result.odds && <span className="meta-pill">${result.odds.toFixed(2)}</span>}
+                      <span className="meta-pill">{formatModeLabel(mode)}</span>
+                    </div>
+                  </div>
+                  <div className="confidence-cluster">
+                    <div className="confidence-caption">Confidence</div>
+                    <div className="confidence-number">{result.confidence}%</div>
+                  </div>
+                </div>
+
+                <div className="confidence-meter">
+                  <div className="confidence-meter-fill" style={{ width: `${result.confidence}%` }} />
+                </div>
+
+                <div className="top-pick-reasoning">{result.reasoning}</div>
+
+                {result.breakdown && (
+                  <div className="breakdown-grid">
+                    {SCORE_FACTORS.map(factor => {
+                      const score = result.breakdown[factor.key] ?? 0
+                      return (
+                        <div className="breakdown-row" key={factor.key}>
+                          <div className="breakdown-label-group">
+                            <span>{factor.label}</span>
+                            <span>{factor.weight}</span>
+                          </div>
+                          <div className="breakdown-bar-shell">
+                            <div className={`breakdown-bar ${getFactorTone(score)}`} style={{ width: `${score}%` }} />
+                          </div>
+                          <div className="breakdown-score">{score}</div>
+                        </div>
+                      )
+                    })}
+                  </div>
+                )}
+
+                {(tracksideMode || !recorded) && (
+                  <div className={`record-panel ${tracksideMode ? 'trackside' : ''}`}>
+                    {!recorded ? (
+                      <>
+                        <label className="record-input">
+                          <span>Odds</span>
+                          <input
+                            type="number"
+                            step="0.05"
+                            min="1"
+                            placeholder={result.odds?.toFixed(2) ?? '2.50'}
+                            value={odds}
+                            onChange={e => setOdds(e.target.value)}
+                          />
+                        </label>
+                        <div className="record-actions">
+                          <button className="result-btn win" onClick={() => handleRecord('win')} disabled={recording}>Win</button>
+                          <button className="result-btn loss" onClick={() => handleRecord('loss')} disabled={recording}>Loss</button>
+                          <button className="result-btn scratched" onClick={() => handleRecord('scratched')} disabled={recording}>Scratched</button>
+                        </div>
+                      </>
+                    ) : (
+                      <div className="recorded-chip">Result recorded</div>
+                    )}
+                  </div>
+                )}
+              </section>
+
+              {!tracksideMode && result.allScores?.length > 0 && (
+                <section className="dashboard-card">
+                  <div className="section-title">Full Field</div>
+                  <div className="table-shell">
+                    <table className="field-table">
                       <thead>
-                        <tr><th>Date</th><th>Track</th><th>R</th><th>Runner</th><th>Mode</th><th>Odds</th><th>P&amp;L</th><th>Result</th></tr>
+                        <tr>
+                          <th>Rank</th>
+                          <th>Box</th>
+                          <th>Name</th>
+                          <th>Form</th>
+                          <th>Best Time</th>
+                          <th>Composite</th>
+                          <th>Factors</th>
+                        </tr>
                       </thead>
                       <tbody>
-                        {stats.last10.map(p => {
-                          const resultStatus = formatPredictionResult(p.result)
-
-                          return (
-                            <tr key={p.id}>
-                              <td>{p.date}</td>
-                              <td>{p.track}</td>
-                              <td>{p.race_number}</td>
-                              <td>{p.runner}</td>
-                              <td><span className={`badge ${p.mode}`}>{p.mode}</span></td>
-                              <td>{p.odds ? `$${p.odds.toFixed(2)}` : '—'}</td>
-                              <td style={{ color: p.pnl > 0 ? '#4ade80' : p.pnl < 0 ? '#f87171' : undefined }}>
-                                {p.pnl != null ? `${p.pnl >= 0 ? '+' : ''}$${p.pnl.toFixed(2)}` : '—'}
-                              </td>
-                              <td>
-                                <span className={`badge ${resultStatus}`}>{resultStatus}</span>
-                                {resultStatus !== 'pending' && (
+                        {result.allScores.map((runnerScore, index) => (
+                          <tr
+                            key={runnerScore.name}
+                            className={`${runnerScore.name === result.runner ? 'highlight' : ''} ${runnerScore.scratched ? 'scratched' : ''}`.trim()}
+                          >
+                            <td>{index + 1}</td>
+                            <td><span className={`box-pill compact ${getBoxBadgeClass(runnerScore.box ?? runnerScore.barrier)}`}>{runnerScore.box ?? runnerScore.barrier ?? '—'}</span></td>
+                            <td>{runnerScore.name}</td>
+                            <td>{runnerScore.breakdown?.recentForm ?? '—'}</td>
+                            <td>{runnerScore.breakdown?.bestTime ?? '—'}</td>
+                            <td className="composite-cell">{runnerScore.compositeScore ?? runnerScore.score}</td>
+                            <td>
+                              <div className="factor-dot-row">
+                                {SCORE_FACTORS.map(factor => (
                                   <span
-                                    className="result-origin-icon"
-                                    title={p.resolved_automatically ? 'Resolved automatically' : 'Recorded manually'}
-                                  >
-                                    {p.resolved_automatically ? '🤖' : '✋'}
-                                  </span>
-                                )}
-                              </td>
-                            </tr>
-                          )
-                        })}
+                                    key={`${runnerScore.name}-${factor.key}`}
+                                    className={`factor-dot ${getFactorTone(runnerScore.breakdown?.[factor.key] ?? 0)}`}
+                                    title={`${factor.label}: ${runnerScore.breakdown?.[factor.key] ?? 0}`}
+                                  />
+                                ))}
+                              </div>
+                            </td>
+                          </tr>
+                        ))}
                       </tbody>
                     </table>
                   </div>
-                </>
+                </section>
               )}
-            </>
-          )}
 
-          {dashboardTab === 'boxBias' && (
-            <>
-              <div className="panel-toolbar">
-                <div>
-                  <div className="subsection-title">Track Box Bias</div>
-                  <div className="subsection-copy">Empirical win rates by box for the selected track and distance</div>
-                </div>
-                <button className="refresh-btn" onClick={() => loadBoxBias()} disabled={boxBiasLoading || !boxBiasTrack || !boxBiasDistance}>
-                  {boxBiasLoading ? 'Refreshing...' : 'Refresh'}
-                </button>
-              </div>
-
-              <div className="controls-grid bias-controls">
-                <label>
-                  Track
-                  <input list="track-options" value={boxBiasTrack} onChange={e => setBoxBiasTrack(e.target.value)} />
-                  <datalist id="track-options">
-                    {Array.from(new Set(meetings.filter(Boolean))).map(trackName => (
-                      <option key={trackName} value={trackName} />
+              {!tracksideMode && (
+                <section className="dashboard-card sources-card">
+                  <div className="section-title">Sources</div>
+                  <div className="source-pill-grid">
+                    {sourceRows.map(source => (
+                      <span
+                        key={source.sourceName}
+                        className={`source-pill ${source.status}`}
+                        title={source.hoverCopy}
+                      >
+                        {source.sourceName}
+                      </span>
                     ))}
-                  </datalist>
-                </label>
-
-                <label>
-                  Distance (m)
-                  <input type="number" min="100" step="10" value={boxBiasDistance} onChange={e => setBoxBiasDistance(Number(e.target.value) || 0)} />
-                </label>
-              </div>
-
-              <div className="bias-note">
-                {boxBiasData.source === 'empirical'
-                  ? 'Showing empirical box bias learned from settled predictions.'
-                  : boxBiasData.message || 'Showing default box bias because historical data is insufficient.'}
-              </div>
-
-              <div className="health-table-wrap">
-                <table className="health-table">
-                  <thead>
-                    <tr>
-                      <th>Box</th>
-                      <th>Win rate</th>
-                      <th>Sample size</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {boxBiasData.boxes?.length > 0 ? (
-                      boxBiasData.boxes.map(box => (
-                        <tr key={box.box}>
-                          <td>Box {box.box}</td>
-                          <td><span className={`health-rate ${getBoxBiasTone(box.win_rate_pct)}`}>{box.win_rate_pct}%</span></td>
-                          <td>{box.total_predictions}</td>
-                        </tr>
-                      ))
-                    ) : (
-                      <tr>
-                        <td colSpan="3" className="empty-state">No box bias data available for this track and distance yet.</td>
-                      </tr>
-                    )}
-                  </tbody>
-                </table>
-              </div>
-            </>
+                  </div>
+                  {result.boxBiasSource && <div className="micro-note">Box bias source: {result.boxBiasSource}</div>}
+                  {result.warning && <div className="warning-panel">{result.warning}</div>}
+                </section>
+              )}
+            </div>
           )}
 
-          {dashboardTab === 'journal' && (
-            <>
-              <div className="panel-toolbar">
-                <div>
-                  <div className="subsection-title">Prediction Journal</div>
-                  <div className="subsection-copy">Recent prediction snapshots with sources, scoring, and winner context</div>
-                </div>
-                <button className="refresh-btn" onClick={() => loadJournal()} disabled={journalLoading}>
-                  {journalLoading ? 'Refreshing...' : 'Refresh'}
-                </button>
+          {!tracksideMode && stats && (
+            <section className="dashboard-shell">
+              <div className="dashboard-tab-strip">
+                {DASHBOARD_TABS.map(tab => (
+                  <button
+                    key={tab.key}
+                    className={`dashboard-tab-button ${dashboardTab === tab.key ? 'active' : ''}`}
+                    onClick={() => setDashboardTab(tab.key)}
+                  >
+                    <span className="dashboard-tab-icon">{tab.icon}</span>
+                    <span>{tab.label}</span>
+                    {tab.key === 'predictions' && pendingPredictions.length > 0 && (
+                      <span className="dashboard-tab-badge">{pendingPredictions.length}</span>
+                    )}
+                  </button>
+                ))}
               </div>
 
-              <div className="health-table-wrap">
-                <table className="journal-table">
-                  <thead>
-                    <tr>
-                      <th>Date</th>
-                      <th>Track</th>
-                      <th>Race</th>
-                      <th>Pick</th>
-                      <th>Mode</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {journalEntries.length > 0 ? (
-                      journalEntries.flatMap(entry => {
-                        const isExpanded = expandedJournalId === entry.prediction_id
+              <div className="dashboard-stage" key={dashboardTab}>
+                {dashboardTab === 'overview' && (
+                  <>
+                    <div className="stats-hero-grid">
+                      <article className="stat-tile">
+                        <span className="stat-heading">Win Rate</span>
+                        <strong className="stat-number">{stats.overall_win_rate}%</strong>
+                        <span className="stat-subtext">Across all settled predictions</span>
+                      </article>
 
-                        return [
-                          (
-                            <tr
-                              key={`summary-${entry.id}`}
-                              className="journal-row"
-                              onClick={() => setExpandedJournalId(current => current === entry.prediction_id ? null : entry.prediction_id)}
-                            >
-                              <td>{entry.race_date}</td>
-                              <td>{entry.track}</td>
-                              <td>R{entry.race_number}</td>
-                              <td>{entry.winner_name}</td>
-                              <td><span className={`badge ${entry.mode_used}`}>{entry.mode_used}</span></td>
+                      <article className="stat-tile">
+                        <span className="stat-heading">P&amp;L</span>
+                        <strong className={`stat-number ${stats.total_pnl >= 0 ? 'positive' : 'negative'}`}>
+                          {stats.total_pnl >= 0 ? '+' : ''}${stats.total_pnl.toFixed(2)}
+                        </strong>
+                        <span className="stat-subtext">Realised profit and loss</span>
+                      </article>
+
+                      <article className="stat-tile">
+                        <span className="stat-heading">Predictions Made</span>
+                        <strong className="stat-number">{predictions.length}</strong>
+                        <span className="stat-subtext">Recorded in the ledger</span>
+                      </article>
+
+                      <article className="stat-tile">
+                        <span className="stat-heading">Current Streak</span>
+                        <strong className={`stat-number ${streak.tone}`}>{streak.label}</strong>
+                        <span className="stat-subtext">Latest settled sequence</span>
+                      </article>
+                    </div>
+
+                    <div className="overview-grid">
+                      <section className="dashboard-card">
+                        <div className="section-title">Win Rate By Mode</div>
+                        <div className="mode-mini-grid">
+                          {modePerformance.map(modeRow => (
+                            <div className={`mode-mini-card ${modeRow.mode}`} key={modeRow.mode}>
+                              <span className="mode-mini-title">{formatModeLabel(modeRow.mode)}</span>
+                              <strong>{modeRow.win_rate}%</strong>
+                              <span>{modeRow.wins}/{modeRow.total} wins</span>
+                            </div>
+                          ))}
+                        </div>
+                      </section>
+
+                      <section className="dashboard-card">
+                        <div className="section-title">Recent Form</div>
+                        <div className="recent-form-strip">
+                          {recentResultSquares.length > 0 ? recentResultSquares.map(prediction => {
+                            const status = formatPredictionResult(prediction.result)
+                            return (
+                              <span
+                                key={prediction.id}
+                                className={`result-square ${getResultTone(status)}`}
+                                title={`${prediction.date} · ${prediction.track} R${prediction.race_number} · ${status}`}
+                              />
+                            )
+                          }) : (
+                            <div className="empty-state-card">No prediction history yet.</div>
+                          )}
+                        </div>
+                        {recentResultSquares.length > 0 && (
+                          <div className="micro-note">Last 10 results: green win, red loss, grey pending or scratched.</div>
+                        )}
+                      </section>
+
+                      <section className="dashboard-card result-check-card">
+                        <div className="section-title">Result Checker</div>
+                        <p className="dashboard-copy">Past unresolved predictions can be checked now, and the server will also re-check every 30 minutes while it is running.</p>
+                        <div className="result-check-row">
+                          <span className={`pending-pill ${pendingPredictions.length > 0 ? 'active' : ''}`}>Pending {pendingPredictions.length}</span>
+                          <span className="micro-note">Automatic polling enabled</span>
+                        </div>
+                        <button className={`panel-button ${checkingResults ? 'loading' : ''}`} onClick={handleCheckResults} disabled={checkingResults}>
+                          <span className={checkingResults ? 'button-spinner' : ''} />
+                          <span>{checkingResults ? 'CHECKING RESULTS...' : 'CHECK RESULTS'}</span>
+                        </button>
+                      </section>
+                    </div>
+                  </>
+                )}
+
+                {dashboardTab === 'predictions' && (
+                  <section className="dashboard-card">
+                    <div className="tab-toolbar">
+                      <div>
+                        <div className="section-title">Predictions Ledger</div>
+                        <div className="dashboard-copy">Sortable ledger of every stored prediction, including auto-resolved and manual result entries.</div>
+                      </div>
+                      <span className={`pending-pill ${pendingPredictions.length > 0 ? 'active' : ''}`}>Pending {pendingPredictions.length}</span>
+                    </div>
+
+                    <div className="table-shell">
+                      <table className="predictions-table">
+                        <thead>
+                          <tr>
+                            <th><button className="sort-button" onClick={() => togglePredictionSort('date')}>Date {predictionSort.key === 'date' ? (predictionSort.direction === 'asc' ? '↑' : '↓') : ''}</button></th>
+                            <th><button className="sort-button" onClick={() => togglePredictionSort('track')}>Track {predictionSort.key === 'track' ? (predictionSort.direction === 'asc' ? '↑' : '↓') : ''}</button></th>
+                            <th><button className="sort-button" onClick={() => togglePredictionSort('race_number')}>Race {predictionSort.key === 'race_number' ? (predictionSort.direction === 'asc' ? '↑' : '↓') : ''}</button></th>
+                            <th><button className="sort-button" onClick={() => togglePredictionSort('runner')}>Pick {predictionSort.key === 'runner' ? (predictionSort.direction === 'asc' ? '↑' : '↓') : ''}</button></th>
+                            <th><button className="sort-button" onClick={() => togglePredictionSort('mode')}>Mode {predictionSort.key === 'mode' ? (predictionSort.direction === 'asc' ? '↑' : '↓') : ''}</button></th>
+                            <th><button className="sort-button" onClick={() => togglePredictionSort('odds')}>Odds {predictionSort.key === 'odds' ? (predictionSort.direction === 'asc' ? '↑' : '↓') : ''}</button></th>
+                            <th><button className="sort-button" onClick={() => togglePredictionSort('pnl')}>P&amp;L {predictionSort.key === 'pnl' ? (predictionSort.direction === 'asc' ? '↑' : '↓') : ''}</button></th>
+                            <th><button className="sort-button" onClick={() => togglePredictionSort('result')}>Result {predictionSort.key === 'result' ? (predictionSort.direction === 'asc' ? '↑' : '↓') : ''}</button></th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {sortedPredictions.length > 0 ? sortedPredictions.map(prediction => {
+                            const resultStatus = formatPredictionResult(prediction.result)
+
+                            return (
+                              <tr key={prediction.id} className={`prediction-row ${resultStatus}`}>
+                                <td>{prediction.date}</td>
+                                <td>{prediction.track}</td>
+                                <td>R{prediction.race_number}</td>
+                                <td>
+                                  <div className="prediction-pick">
+                                    <span>{prediction.race_type === 'greyhound' ? '🐕' : '🐎'}</span>
+                                    <span>{prediction.runner}</span>
+                                  </div>
+                                </td>
+                                <td><span className={`mode-badge ${prediction.mode}`}>{formatModeLabel(prediction.mode)}</span></td>
+                                <td>{prediction.odds ? `$${prediction.odds.toFixed(2)}` : '—'}</td>
+                                <td className={`pnl-cell ${prediction.pnl == null ? '' : prediction.pnl >= 0 ? 'positive' : 'negative'}`}>
+                                  {prediction.pnl != null ? `${prediction.pnl >= 0 ? '+' : ''}$${prediction.pnl.toFixed(2)}` : '—'}
+                                </td>
+                                <td>
+                                  <div className="result-chip-row">
+                                    <span className={`status-badge ${resultStatus}`}>{resultStatus}</span>
+                                    {resultStatus !== 'pending' && (
+                                      <span
+                                        className="resolution-icon"
+                                        title={prediction.resolved_automatically ? 'Resolved automatically' : 'Recorded manually'}
+                                      >
+                                        {prediction.resolved_automatically ? '🤖' : '✋'}
+                                      </span>
+                                    )}
+                                  </div>
+                                </td>
+                              </tr>
+                            )
+                          }) : (
+                            <tr>
+                              <td colSpan="8" className="empty-state">No predictions have been stored yet.</td>
                             </tr>
-                          ),
-                          isExpanded && (
-                            <tr key={`detail-${entry.id}`} className="journal-detail-row">
-                              <td colSpan="5">
-                                <div className="journal-detail">
-                                  <div className="journal-meta-row">
-                                    <span className="bias-note">Box bias source: {entry.box_bias_source || 'default'}</span>
-                                    <span className="journal-meta-pill">Winner score: {entry.winner_composite_score}</span>
+                          )}
+                        </tbody>
+                      </table>
+                    </div>
+                  </section>
+                )}
+
+                {dashboardTab === 'boxBias' && (
+                  <section className="dashboard-card">
+                    <div className="tab-toolbar">
+                      <div>
+                        <div className="section-title">Box Bias</div>
+                        <div className="dashboard-copy">Track-specific box performance with a fallback to default scoring when the sample is still thin.</div>
+                      </div>
+                      <button className="panel-button secondary" onClick={() => loadBoxBias()} disabled={boxBiasLoading || !boxBiasTrack || !boxBiasDistance}>
+                        {boxBiasLoading ? 'REFRESHING...' : 'REFRESH BOX BIAS'}
+                      </button>
+                    </div>
+
+                    <div className="compact-control-grid">
+                      <label>
+                        Track
+                        <input list="track-options" value={boxBiasTrack} onChange={e => setBoxBiasTrack(e.target.value)} />
+                        <datalist id="track-options">
+                          {Array.from(new Set(meetings.filter(Boolean))).map(trackName => (
+                            <option key={trackName} value={trackName} />
+                          ))}
+                        </datalist>
+                      </label>
+
+                      <label>
+                        Distance (m)
+                        <input type="number" min="100" step="10" value={boxBiasDistance} onChange={e => setBoxBiasDistance(Number(e.target.value) || 0)} />
+                      </label>
+                    </div>
+
+                    <div className="micro-note">
+                      {boxBiasData.source === 'empirical'
+                        ? 'Source: empirical history from RaceEdge prediction outcomes.'
+                        : boxBiasData.message || 'Source: default box profile because there is not enough local history yet.'}
+                    </div>
+
+                    <div className="table-shell">
+                      <table className="health-table">
+                        <thead>
+                          <tr>
+                            <th>Box</th>
+                            <th>Win Rate</th>
+                            <th>Sample Size</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {boxBiasRows.map(box => (
+                            <tr key={box.box}>
+                              <td>Box {box.box}</td>
+                              <td><span className={`health-rate ${getBoxBiasTone(box.win_rate_pct)}`}>{box.win_rate_pct}%</span></td>
+                              <td>{box.total_predictions}</td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  </section>
+                )}
+
+                {dashboardTab === 'journal' && (
+                  <section className="dashboard-card">
+                    <div className="tab-toolbar">
+                      <div>
+                        <div className="section-title">Prediction Journal</div>
+                        <div className="dashboard-copy">Open any journal snapshot to inspect source coverage, winner breakdown, and the full ranked field.</div>
+                      </div>
+                      <button className="panel-button secondary" onClick={() => loadJournal()} disabled={journalLoading}>
+                        {journalLoading ? 'REFRESHING...' : 'REFRESH JOURNAL'}
+                      </button>
+                    </div>
+
+                    {journalEntries.length > 0 ? (
+                      <div className="journal-stack">
+                        {journalEntries.map(entry => {
+                          const isExpanded = expandedJournalId === entry.prediction_id
+
+                          return (
+                            <article key={entry.id} className={`journal-entry ${isExpanded ? 'expanded' : ''}`}>
+                              <button
+                                className="journal-summary-row"
+                                onClick={() => setExpandedJournalId(current => current === entry.prediction_id ? null : entry.prediction_id)}
+                              >
+                                <span>{entry.race_date}</span>
+                                <span>{entry.track}</span>
+                                <span>R{entry.race_number}</span>
+                                <span>{entry.winner_name}</span>
+                                <span className={`mode-badge ${entry.mode_used}`}>{formatModeLabel(entry.mode_used)}</span>
+                              </button>
+
+                              {isExpanded && (
+                                <div className="journal-expand">
+                                  <div className="journal-chip-row">
+                                    <span className="journal-meta-pill">Box Data: {entry.box_bias_source || 'default'}</span>
+                                    <span className="journal-meta-pill">Winner Score: {entry.winner_composite_score}</span>
                                     <span className="journal-meta-pill">Distance: {entry.race_distance ? `${entry.race_distance}m` : '—'}</span>
                                   </div>
 
-                                  <div className="score-breakdown">
-                                    <div className="breakdown-heading">Recommended Runner Breakdown</div>
-                                    <div className="breakdown-list">
-                                      {SCORE_FACTORS.map(factor => {
-                                        const score = entry.winner_breakdown?.[factor.key] ?? 0
-                                        return (
-                                          <div className="breakdown-item" key={`${entry.id}-${factor.key}`}>
-                                            <div className="breakdown-meta">
-                                              <span>{factor.label}</span>
-                                              <span>{factor.weight} · {score}</span>
-                                            </div>
-                                            <div className="breakdown-track">
-                                              <div className={`breakdown-fill ${getFactorTone(score)}`} style={{ width: `${score}%` }} />
-                                            </div>
+                                  <div className="journal-breakdown-grid">
+                                    {SCORE_FACTORS.map(factor => {
+                                      const score = entry.winner_breakdown?.[factor.key] ?? 0
+                                      return (
+                                        <div className="breakdown-row" key={`${entry.id}-${factor.key}`}>
+                                          <div className="breakdown-label-group">
+                                            <span>{factor.label}</span>
+                                            <span>{factor.weight}</span>
                                           </div>
-                                        )
-                                      })}
-                                    </div>
+                                          <div className="breakdown-bar-shell">
+                                            <div className={`breakdown-bar ${getFactorTone(score)}`} style={{ width: `${score}%` }} />
+                                          </div>
+                                          <div className="breakdown-score">{score}</div>
+                                        </div>
+                                      )
+                                    })}
                                   </div>
 
-                                  <div style={{ overflowX: 'auto', marginBottom: 14 }}>
-                                    <table className="scores-table">
-                                      <thead><tr><th>#</th><th>Runner</th><th>Score</th><th>Box</th><th>Odds</th></tr></thead>
+                                  <div className="table-shell">
+                                    <table className="journal-field-table">
+                                      <thead>
+                                        <tr>
+                                          <th>Rank</th>
+                                          <th>Runner</th>
+                                          <th>Score</th>
+                                          <th>Box</th>
+                                          <th>Odds</th>
+                                        </tr>
+                                      </thead>
                                       <tbody>
                                         {entry.all_runners?.map((runnerScore, index) => (
-                                          <tr key={`${entry.id}-${runnerScore.name}`} className={runnerScore.name === entry.winner_name ? 'sel' : ''}>
+                                          <tr key={`${entry.id}-${runnerScore.name}`} className={runnerScore.name === entry.winner_name ? 'highlight' : ''}>
                                             <td>{index + 1}</td>
                                             <td>{runnerScore.name}</td>
-                                            <td>{runnerScore.score}</td>
+                                            <td>{runnerScore.compositeScore ?? runnerScore.score ?? '—'}</td>
                                             <td>{runnerScore.box ?? runnerScore.barrier ?? '—'}</td>
                                             <td>{runnerScore.odds ? `$${runnerScore.odds.toFixed(2)}` : '—'}</td>
                                           </tr>
@@ -824,37 +1077,74 @@ function App() {
                                     </table>
                                   </div>
 
-                                  <div className="sources-row">
+                                  <div className="journal-chip-row">
                                     {entry.sources_consulted?.map(source => (
                                       <span
                                         key={`${entry.id}-${source.source}`}
-                                        className={`src-tag ${source.status === 'success' ? 'ok' : 'err'}`}
-                                        title={source.error || `${source.recordsReturned || 0} records`}
+                                        className={`source-pill ${source.status === 'success' ? 'success' : 'failed'}`}
+                                        title={source.error || `${source.recordsReturned || 0} records returned`}
                                       >
-                                        {source.status === 'success' ? '✓' : '✗'} {source.source}
+                                        {source.source}
                                       </span>
                                     ))}
                                   </div>
 
                                   <pre className="journal-summary">{entry.raw_data_summary}</pre>
                                 </div>
-                              </td>
-                            </tr>
-                          ),
-                        ].filter(Boolean)
-                      })
+                              )}
+                            </article>
+                          )
+                        })}
+                      </div>
                     ) : (
-                      <tr>
-                        <td colSpan="5" className="empty-state">No journal entries saved yet.</td>
-                      </tr>
+                      <div className="empty-state-card">No journal entries saved yet.</div>
                     )}
-                  </tbody>
-                </table>
+                  </section>
+                )}
+
+                {dashboardTab === 'sourceHealth' && (
+                  <section className="dashboard-card">
+                    <div className="tab-toolbar">
+                      <div>
+                        <div className="section-title">Source Health</div>
+                        <div className="dashboard-copy">Seven-day view of scraper reliability, latency, and the latest observed failures by source.</div>
+                      </div>
+                      <button className="panel-button secondary" onClick={loadScraperHealth} disabled={healthLoading}>
+                        {healthLoading ? 'REFRESHING...' : 'REFRESH HEALTH'}
+                      </button>
+                    </div>
+
+                    <div className="table-shell">
+                      <table className="health-table">
+                        <thead>
+                          <tr>
+                            <th>Source</th>
+                            <th>Success Rate</th>
+                            <th>Avg Response</th>
+                            <th>Last Error</th>
+                            <th>Last Checked</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {scraperHealth.map(row => (
+                            <tr key={row.source_name}>
+                              <td>{row.display_name || HEALTH_SOURCE_LABELS[row.source_name] || row.source_name}</td>
+                              <td><span className={`health-rate ${getHealthTone(row)}`}>{row.total_attempts ? `${row.success_rate_pct}%` : '—'}</span></td>
+                              <td>{row.average_response_time_ms != null ? `${row.average_response_time_ms} ms` : '—'}</td>
+                              <td title={row.last_seen_error || 'No recent errors'}>{truncateText(row.last_seen_error)}</td>
+                              <td>{formatCheckedAt(row.last_checked)}</td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  </section>
+                )}
               </div>
-            </>
+            </section>
           )}
-        </div>
-      )}
+        </main>
+      </div>
     </div>
   )
 }
