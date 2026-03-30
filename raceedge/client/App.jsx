@@ -204,6 +204,7 @@ function App() {
   const [notice,     setNotice]     = useState(null)
   const [now,        setNow]        = useState(() => new Date())
   const [serverConnected, setServerConnected] = useState(false)
+  const [aiAnalysisPending, setAiAnalysisPending] = useState(false)
   const [tracksideMode, setTracksideMode] = useState(() => (
     typeof window !== 'undefined' ? window.innerWidth < 480 : false
   ))
@@ -400,6 +401,7 @@ function App() {
     setResult(null)
     setRecorded(false)
     setOdds('')
+    setAiAnalysisPending(true)
 
     const srcs = SOURCES[raceType]
     const animPromise = (async () => {
@@ -410,6 +412,7 @@ function App() {
       }
       setLoadMsg('Analysing runners...')
       setActiveSourceIdx(srcs.length)
+      setLoadMsg('Consulting AI analyst...')
     })()
 
     try {
@@ -429,6 +432,7 @@ function App() {
       setLoading(false)
       setLoadMsg('')
       setActiveSourceIdx(-1)
+      setAiAnalysisPending(false)
       loadStats()
       loadPredictions()
       loadScraperHealth()
@@ -637,6 +641,10 @@ function App() {
   const modePerformance = ['safest', 'value', 'longshot'].map(modeKey => (
     stats?.by_mode?.find(row => row.mode === modeKey) || { mode: modeKey, total: 0, wins: 0, win_rate: 0 }
   ))
+  const aiStats = stats?.ai_agreement || { totalWithAI: 0, agreedCount: 0, agreedWinRate: 0, disagreedWinRate: 0 }
+  const aiAgreementRate = aiStats.totalWithAI > 0
+    ? Math.round((aiStats.agreedCount / aiStats.totalWithAI) * 100)
+    : 0
   const boxBiasRows = Array.from({ length: 8 }, (_, index) => {
     const box = index + 1
     return boxBiasData.boxes?.find(entry => Number(entry.box) === box) || {
@@ -820,6 +828,13 @@ function App() {
             </section>
           )}
 
+          {loading && !tracksideMode && (
+            <section className="dashboard-card ai-analyst-card loading">
+              <div className="section-title">🤖 AI Form Analyst</div>
+              <div className="ai-analyst-loading">Consulting AI analyst...</div>
+            </section>
+          )}
+
           {result && !loading && (
             <div className={`results-panel ${tracksideMode ? 'trackside' : ''}`}>
               <section className={`top-pick-card ${tracksideMode ? 'trackside' : ''}`}>
@@ -894,6 +909,59 @@ function App() {
                   </div>
                 )}
               </section>
+
+              {!tracksideMode && (
+                <section className={`dashboard-card ai-analyst-card ${result.aiAnalysis ? 'ready' : 'unavailable'}`}>
+                  <div className="section-title">🤖 AI Form Analyst</div>
+
+                  {!result.aiAnalysis ? (
+                    <div className="empty-state-card ai-analyst-empty">AI analysis unavailable — check `ANTHROPIC_API_KEY` in server `.env`.</div>
+                  ) : (
+                    <div className="ai-analyst-body">
+                      <div className="ai-analyst-recommendation">
+                        <div className="section-eyebrow">Recommendation</div>
+                        <div className={`ai-runner-name ${result.aiAnalysis.modelAgreement ? 'agreement' : 'difference'}`}>
+                          {result.aiAnalysis.recommendation.runner}
+                        </div>
+                        <div className="journal-chip-row">
+                          {result.aiAnalysis.recommendation.box != null && (
+                            <span className={`box-pill ${getBoxBadgeClass(result.aiAnalysis.recommendation.box)}`}>BOX {result.aiAnalysis.recommendation.box}</span>
+                          )}
+                          <span className={`agreement-badge ${result.aiAnalysis.modelAgreement ? 'agree' : 'differs'}`}>
+                            {result.aiAnalysis.modelAgreement ? '✅ AGREES WITH MODEL' : '⚠️ DIFFERS FROM MODEL'}
+                          </span>
+                        </div>
+                        <div className="ai-analyst-reasoning">{result.aiAnalysis.recommendation.reasoning}</div>
+                      </div>
+
+                      <div className="ai-analyst-section">
+                        <div className="section-eyebrow">Value Watch</div>
+                        <div className="ai-supporting-runner">{result.aiAnalysis.valueWatch?.runner || '—'}</div>
+                        <div className="dashboard-copy">{result.aiAnalysis.valueWatch?.reasoning || 'No alternative highlighted.'}</div>
+                      </div>
+
+                      <div className="ai-analyst-section">
+                        <div className="section-eyebrow">Race Dynamic</div>
+                        <div className="dashboard-copy">{result.aiAnalysis.raceDynamic}</div>
+                      </div>
+
+                      <div className="ai-confidence-row">
+                        <span className={`ai-confidence-badge ${String(result.aiAnalysis.confidence || '').toLowerCase()}`}>
+                          {result.aiAnalysis.confidence}
+                        </span>
+                        <span className="dashboard-copy">{result.aiAnalysis.confidenceReason}</span>
+                      </div>
+
+                      {result.aiAnalysis.concerns && (
+                        <div className="ai-concerns-box">
+                          <div className="section-eyebrow">Concerns</div>
+                          <div>{result.aiAnalysis.concerns}</div>
+                        </div>
+                      )}
+                    </div>
+                  )}
+                </section>
+              )}
 
               {!tracksideMode && result.allScores?.length > 0 && (
                 <section className="dashboard-card">
@@ -1194,6 +1262,32 @@ function App() {
                           <span>{checkingResults ? 'CHECKING RESULTS...' : 'CHECK RESULTS'}</span>
                         </button>
                       </section>
+
+                      <section className="dashboard-card ai-performance-card">
+                        <div className="section-title">AI Analyst Performance</div>
+                        <div className="ai-performance-grid">
+                          <div className="mode-mini-card">
+                            <span className="mode-mini-title">Predictions With AI</span>
+                            <strong>{aiStats.totalWithAI}</strong>
+                            <span>Claude form notes recorded</span>
+                          </div>
+                          <div className="mode-mini-card">
+                            <span className="mode-mini-title">Agreement Rate</span>
+                            <strong>{aiAgreementRate}%</strong>
+                            <span>{aiStats.agreedCount}/{aiStats.totalWithAI} aligned</span>
+                          </div>
+                          <div className="mode-mini-card">
+                            <span className="mode-mini-title">When AI Agrees</span>
+                            <strong>{aiStats.agreedWinRate}%</strong>
+                            <span>Win rate with alignment</span>
+                          </div>
+                          <div className="mode-mini-card">
+                            <span className="mode-mini-title">When AI Differs</span>
+                            <strong>{aiStats.disagreedWinRate}%</strong>
+                            <span>Win rate without alignment</span>
+                          </div>
+                        </div>
+                      </section>
                     </div>
                   </>
                 )}
@@ -1418,6 +1512,27 @@ function App() {
                                       </span>
                                     ))}
                                   </div>
+
+                                  {entry.ai_analysis && (
+                                    <div className="journal-ai-panel">
+                                      <div className="section-eyebrow">AI Form Analyst</div>
+                                      <div className={`ai-runner-name ${entry.ai_analysis.modelAgreement ? 'agreement' : 'difference'}`}>
+                                        {entry.ai_analysis.recommendation?.runner || 'No recommendation'}
+                                      </div>
+                                      <div className="journal-chip-row">
+                                        <span className={`agreement-badge ${entry.ai_analysis.modelAgreement ? 'agree' : 'differs'}`}>
+                                          {entry.ai_analysis.modelAgreement ? '✅ AGREES WITH MODEL' : '⚠️ DIFFERS FROM MODEL'}
+                                        </span>
+                                        <span className={`ai-confidence-badge ${String(entry.ai_analysis.confidence || '').toLowerCase()}`}>
+                                          {entry.ai_analysis.confidence}
+                                        </span>
+                                      </div>
+                                      <div className="dashboard-copy">{entry.ai_analysis.recommendation?.reasoning}</div>
+                                      <div className="dashboard-copy">Value watch: {entry.ai_analysis.valueWatch?.runner || '—'} — {entry.ai_analysis.valueWatch?.reasoning || 'No note'}</div>
+                                      <div className="dashboard-copy">Race dynamic: {entry.ai_analysis.raceDynamic}</div>
+                                      {entry.ai_analysis.concerns && <div className="ai-concerns-box compact">{entry.ai_analysis.concerns}</div>}
+                                    </div>
+                                  )}
 
                                   <pre className="journal-summary">{entry.raw_data_summary}</pre>
                                 </div>

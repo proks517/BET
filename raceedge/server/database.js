@@ -20,6 +20,8 @@ const SCHEMA = `
     stake       REAL NOT NULL DEFAULT 10,
     pnl         REAL,
     race_distance INTEGER,
+    ai_recommendation TEXT,
+    ai_agreed   INTEGER,
     resolved_automatically INTEGER NOT NULL DEFAULT 0,
     default_odds_used INTEGER NOT NULL DEFAULT 0,
     created_at  TEXT NOT NULL DEFAULT (datetime('now'))
@@ -51,6 +53,7 @@ const SCHEMA = `
     winner_box             INTEGER,
     winner_composite_score INTEGER NOT NULL,
     winner_breakdown_json  TEXT NOT NULL,
+    ai_analysis_json       TEXT,
     mode_used              TEXT NOT NULL,
     box_bias_source        TEXT,
     raw_data_summary       TEXT NOT NULL,
@@ -88,6 +91,7 @@ function parseJournalRow(row) {
     all_runners: parseJsonColumn(row.all_runners_json, []),
     sources_consulted: parseJsonColumn(row.sources_consulted_json, []),
     winner_breakdown: parseJsonColumn(row.winner_breakdown_json, {}),
+    ai_analysis: parseJsonColumn(row.ai_analysis_json, null),
   }
 }
 
@@ -113,6 +117,8 @@ function parsePredictionRow(row) {
     stake: row.stake == null ? null : Number(row.stake),
     pnl: row.pnl == null ? null : Number(row.pnl),
     race_distance: row.race_distance == null ? null : Number(row.race_distance),
+    ai_recommendation: row.ai_recommendation ?? null,
+    ai_agreed: row.ai_agreed == null ? null : Boolean(Number(row.ai_agreed)),
     resolved_automatically: Boolean(Number(row.resolved_automatically)),
     default_odds_used: Boolean(Number(row.default_odds_used)),
     result: row.result ?? 'pending',
@@ -124,9 +130,12 @@ function initDb() {
   db.pragma('journal_mode = WAL')
   db.exec(SCHEMA)
   ensureColumn(db, 'predictions', 'race_distance', 'INTEGER')
+  ensureColumn(db, 'predictions', 'ai_recommendation', 'TEXT')
+  ensureColumn(db, 'predictions', 'ai_agreed', 'INTEGER')
   ensureColumn(db, 'predictions', 'resolved_automatically', 'INTEGER NOT NULL DEFAULT 0')
   ensureColumn(db, 'predictions', 'default_odds_used', 'INTEGER NOT NULL DEFAULT 0')
   ensureColumn(db, 'prediction_journal', 'race_distance', 'INTEGER')
+  ensureColumn(db, 'prediction_journal', 'ai_analysis_json', 'TEXT')
   ensureColumn(db, 'prediction_journal', 'box_bias_source', 'TEXT')
   return db
 }
@@ -143,11 +152,27 @@ function savePrediction(db, {
   stake = 10,
   race_distance = null,
   odds = null,
+  ai_recommendation = null,
+  ai_agreed = null,
 }) {
   const info = db.prepare(`
-    INSERT INTO predictions (date, track, race_number, race_type, runner, box_barrier, mode, confidence, stake, race_distance, odds)
-    VALUES (@date, @track, @race_number, @race_type, @runner, @box_barrier, @mode, @confidence, @stake, @race_distance, @odds)
-  `).run({ date, track, race_number, race_type, runner, box_barrier, mode, confidence, stake, race_distance, odds })
+    INSERT INTO predictions (date, track, race_number, race_type, runner, box_barrier, mode, confidence, stake, race_distance, odds, ai_recommendation, ai_agreed)
+    VALUES (@date, @track, @race_number, @race_type, @runner, @box_barrier, @mode, @confidence, @stake, @race_distance, @odds, @ai_recommendation, @ai_agreed)
+  `).run({
+    date,
+    track,
+    race_number,
+    race_type,
+    runner,
+    box_barrier,
+    mode,
+    confidence,
+    stake,
+    race_distance,
+    odds,
+    ai_recommendation,
+    ai_agreed: ai_agreed == null ? null : (ai_agreed ? 1 : 0),
+  })
   return parsePredictionRow(db.prepare('SELECT * FROM predictions WHERE id = ?').get(info.lastInsertRowid))
 }
 
@@ -255,7 +280,31 @@ function getStats(db) {
   const last10 = db.prepare('SELECT * FROM predictions ORDER BY id DESC LIMIT 10').all().map(parsePredictionRow)
   const pending_count = getPendingPredictions(db).length
 
-  return { overall_win_rate, by_mode, by_type, total_pnl, last10, pending_count }
+  return { overall_win_rate, by_mode, by_type, total_pnl, last10, pending_count, ai_agreement: getAIAgreementStats(db) }
+}
+
+function getAIAgreementStats(db) {
+  const rows = db.prepare(`
+    SELECT *
+    FROM predictions
+    WHERE ai_recommendation IS NOT NULL
+      AND ai_recommendation != ''
+  `).all().map(parsePredictionRow)
+
+  const totalWithAI = rows.length
+  const agreedRows = rows.filter(row => row.ai_agreed === true)
+  const disagreedRows = rows.filter(row => row.ai_agreed === false)
+  const settledAgreed = agreedRows.filter(row => row.result && row.result !== 'pending')
+  const settledDisagreed = disagreedRows.filter(row => row.result && row.result !== 'pending')
+  const agreedWins = settledAgreed.filter(row => row.result === 'win').length
+  const disagreedWins = settledDisagreed.filter(row => row.result === 'win').length
+
+  return {
+    totalWithAI,
+    agreedCount: agreedRows.length,
+    agreedWinRate: settledAgreed.length > 0 ? Math.round((agreedWins / settledAgreed.length) * 100) : 0,
+    disagreedWinRate: settledDisagreed.length > 0 ? Math.round((disagreedWins / settledDisagreed.length) * 100) : 0,
+  }
 }
 
 function logScraperHealth(db, entry) {
@@ -386,6 +435,7 @@ function saveJournalEntry(db, entry) {
       winner_box,
       winner_composite_score,
       winner_breakdown_json,
+      ai_analysis_json,
       mode_used,
       box_bias_source,
       raw_data_summary
@@ -402,6 +452,7 @@ function saveJournalEntry(db, entry) {
       @winner_box,
       @winner_composite_score,
       @winner_breakdown_json,
+      @ai_analysis_json,
       @mode_used,
       @box_bias_source,
       @raw_data_summary
@@ -413,6 +464,7 @@ function saveJournalEntry(db, entry) {
     all_runners_json: JSON.stringify(entry.all_runners_json ?? []),
     sources_consulted_json: JSON.stringify(entry.sources_consulted_json ?? []),
     winner_breakdown_json: JSON.stringify(entry.winner_breakdown_json ?? {}),
+    ai_analysis_json: entry.ai_analysis_json == null ? null : JSON.stringify(entry.ai_analysis_json),
     box_bias_source: entry.box_bias_source ?? null,
   })
 
@@ -450,6 +502,7 @@ module.exports = {
   getPendingPredictions,
   autoResolveResult,
   getStats,
+  getAIAgreementStats,
   logScraperHealth,
   getScraperStats,
   getBoxBiasStats,

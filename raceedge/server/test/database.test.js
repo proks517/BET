@@ -11,6 +11,7 @@ const {
   getPendingPredictions,
   autoResolveResult,
   getStats,
+  getAIAgreementStats,
   logScraperHealth,
   getScraperStats,
   getBoxBiasStats,
@@ -136,6 +137,92 @@ describe('getStats', () => {
     assert.ok(Array.isArray(stats.by_type))
     assert.ok(typeof stats.total_pnl === 'number')
     assert.ok(Array.isArray(stats.last10))
+  })
+})
+
+describe('AI agreement stats', () => {
+  beforeEach(() => {
+    db.exec('DELETE FROM predictions')
+  })
+
+  test('getAIAgreementStats returns correct aggregates', () => {
+    const agreedWin = savePrediction(db, {
+      date: '2026-03-29',
+      track: 'Richmond',
+      race_number: 1,
+      race_type: 'greyhound',
+      runner: 'Agree Win',
+      box_barrier: 1,
+      mode: 'safest',
+      confidence: 82,
+      ai_recommendation: 'Agree Win',
+      ai_agreed: true,
+    })
+    updateResult(db, agreedWin.id, 'win', 2.8)
+
+    const agreedLoss = savePrediction(db, {
+      date: '2026-03-29',
+      track: 'Richmond',
+      race_number: 2,
+      race_type: 'greyhound',
+      runner: 'Agree Loss',
+      box_barrier: 2,
+      mode: 'value',
+      confidence: 71,
+      ai_recommendation: 'Agree Loss',
+      ai_agreed: true,
+    })
+    updateResult(db, agreedLoss.id, 'loss', 4.2)
+
+    const disagreedWin = savePrediction(db, {
+      date: '2026-03-29',
+      track: 'Richmond',
+      race_number: 3,
+      race_type: 'greyhound',
+      runner: 'Model Pick',
+      box_barrier: 3,
+      mode: 'value',
+      confidence: 69,
+      ai_recommendation: 'Claude Pick',
+      ai_agreed: false,
+    })
+    updateResult(db, disagreedWin.id, 'win', 5.1)
+
+    const disagreedLoss = savePrediction(db, {
+      date: '2026-03-29',
+      track: 'Richmond',
+      race_number: 4,
+      race_type: 'greyhound',
+      runner: 'Another Model Pick',
+      box_barrier: 4,
+      mode: 'longshot',
+      confidence: 58,
+      ai_recommendation: 'Different Claude Pick',
+      ai_agreed: false,
+    })
+    updateResult(db, disagreedLoss.id, 'loss', 8.5)
+
+    savePrediction(db, {
+      date: '2026-03-29',
+      track: 'Richmond',
+      race_number: 5,
+      race_type: 'greyhound',
+      runner: 'Pending AI',
+      box_barrier: 5,
+      mode: 'safest',
+      confidence: 60,
+      ai_recommendation: 'Pending AI',
+      ai_agreed: true,
+    })
+
+    const stats = getAIAgreementStats(db)
+
+    assert.deepEqual(stats, {
+      totalWithAI: 5,
+      agreedCount: 3,
+      agreedWinRate: 50,
+      disagreedWinRate: 50,
+    })
   })
 })
 
@@ -495,6 +582,15 @@ describe('prediction journal', () => {
         trainerStrikeRate: 50,
         daysSinceLastRun: 85,
       },
+      ai_analysis_json: {
+        recommendation: { runner: 'Journal Star', box: 3, reasoning: 'Clean map and best blend of speed.' },
+        valueWatch: { runner: 'Late Split', reasoning: 'Drawn to settle close and run on.' },
+        raceDynamic: 'Inside speed should control the early stages.',
+        confidence: 'MEDIUM',
+        confidenceReason: 'The map suits but the race has depth.',
+        concerns: 'Can be vulnerable late if pressured.',
+        modelAgreement: true,
+      },
       mode_used: 'value',
       box_bias_source: 'empirical',
       raw_data_summary: 'thedogs.com.au: success (8 runners)\ntab.com.au: empty (0 runners)',
@@ -527,6 +623,15 @@ describe('prediction journal', () => {
       classConsistency: 72,
       trainerStrikeRate: 50,
       daysSinceLastRun: 85,
+    })
+    assert.deepEqual(entry.ai_analysis, {
+      recommendation: { runner: 'Journal Star', box: 3, reasoning: 'Clean map and best blend of speed.' },
+      valueWatch: { runner: 'Late Split', reasoning: 'Drawn to settle close and run on.' },
+      raceDynamic: 'Inside speed should control the early stages.',
+      confidence: 'MEDIUM',
+      confidenceReason: 'The map suits but the race has depth.',
+      concerns: 'Can be vulnerable late if pressured.',
+      modelAgreement: true,
     })
     assert.equal(history.length, 1)
     assert.equal(history[0].prediction_id, prediction.id)

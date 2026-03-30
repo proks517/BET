@@ -8,12 +8,15 @@
     "server": "node --watch server/index.js",
     "client": "vite",
     "build": "vite build",
-    "test": "node --test server/test/database.test.js server/test/predictor.test.js server/test/scraper.test.js",
+    "test": "node --test server/test/database.test.js server/test/predictor.test.js server/test/scraper.test.js server/test/analyst.test.js server/test/index.test.js",
     "test:db": "node --test server/test/database.test.js",
+    "test:analyst": "node --test server/test/analyst.test.js",
+    "test:index": "node --test server/test/index.test.js",
     "test:predictor": "node --test server/test/predictor.test.js",
     "test:scraper": "node --test server/test/scraper.test.js"
   },
   "dependencies": {
+    "@anthropic-ai/sdk": "^0.80.0",
     "better-sqlite3": "^12.8.0",
     "cheerio": "^1.0.0",
     "cors": "^2.8.5",

@@ -511,6 +511,105 @@ select:focus {
   border-left: 4px solid var(--accent-gold);
 }
 
+.ai-analyst-card {
+  border-color: rgba(59, 130, 246, 0.45);
+  box-shadow: 0 0 0 1px rgba(59, 130, 246, 0.18), var(--shadow);
+}
+
+.ai-analyst-card.loading {
+  animation: pulseButton 1s infinite alternate;
+}
+
+.ai-analyst-loading {
+  color: #bfdbfe;
+  font-style: italic;
+}
+
+.ai-analyst-body,
+.ai-analyst-section,
+.ai-analyst-recommendation,
+.journal-ai-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.ai-runner-name {
+  font-size: 1.6rem;
+  font-weight: 800;
+}
+
+.ai-runner-name.agreement {
+  color: var(--accent-gold);
+}
+
+.ai-runner-name.difference,
+.ai-supporting-runner {
+  color: #fcd34d;
+}
+
+.ai-analyst-reasoning {
+  font-style: italic;
+  color: var(--text-primary);
+  line-height: 1.6;
+}
+
+.agreement-badge,
+.ai-confidence-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 34px;
+  padding: 0 12px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  font-weight: 700;
+}
+
+.agreement-badge.agree {
+  border-color: rgba(16, 185, 129, 0.35);
+  color: #7ef0c3;
+  background: rgba(16, 185, 129, 0.12);
+}
+
+.agreement-badge.differs,
+.ai-confidence-badge.medium {
+  border-color: rgba(245, 158, 11, 0.35);
+  color: #fcd34d;
+  background: rgba(245, 158, 11, 0.12);
+}
+
+.ai-confidence-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  align-items: center;
+}
+
+.ai-confidence-badge.high {
+  border-color: rgba(16, 185, 129, 0.35);
+  color: #7ef0c3;
+  background: rgba(16, 185, 129, 0.12);
+}
+
+.ai-confidence-badge.low {
+  border-color: rgba(239, 68, 68, 0.35);
+  color: #fda4af;
+  background: rgba(239, 68, 68, 0.12);
+}
+
+.ai-concerns-box {
+  padding: 14px;
+  border-radius: var(--radius);
+  border: 1px solid rgba(239, 68, 68, 0.3);
+  background: rgba(82, 24, 31, 0.42);
+  color: #fecaca;
+}
+
+.ai-concerns-box.compact {
+  padding: 12px;
+}
+
 .confidence-cluster {
   margin-left: auto;
   text-align: right;
@@ -929,6 +1028,12 @@ select:focus {
 .mode-mini-card.value strong { color: var(--accent-gold); }
 .mode-mini-card.longshot strong { color: var(--accent-red); }
 
+.ai-performance-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 12px;
+}
+
 .recent-form-strip {
   display: flex;
   flex-wrap: wrap;
@@ -1115,7 +1220,8 @@ select:focus {
   .stats-hero-grid,
   .overview-grid,
   .mode-mini-grid,
-  .best-bets-grid {
+  .best-bets-grid,
+  .ai-performance-grid {
     grid-template-columns: 1fr;
   }
 

@@ -25,6 +25,7 @@ const {
   closeBrowser,
 } = require('./scraper.js')
 const { applyMode, generateBestBets, getDefaultBoxBiasTable } = require('./predictor.js')
+const { analyseRace } = require('./analyst.js')
 
 const app  = express()
 const PORT = process.env.PORT || 3001
@@ -326,14 +327,17 @@ app.get('/api/races', (req, res) => {
   res.json({ races: Array.from({ length: 12 }, (_, i) => i + 1) })
 })
 
-// POST /api/research
-app.post('/api/research', async (req, res) => {
+async function handleResearchRequest(req, res, {
+  researchFn = research,
+  analyseRaceFn = analyseRace,
+  dbInstance = db,
+} = {}) {
   const { date, meeting, raceNumber, raceType, mode, stake, distance } = req.body
   if (!date || !meeting || !raceNumber || !raceType || !mode) {
     return res.status(400).json({ error: 'date, meeting, raceNumber, raceType, mode are all required' })
   }
   try {
-    const scrape = await research(date, meeting, raceNumber, raceType, db)
+    const scrape = await researchFn(date, meeting, raceNumber, raceType, dbInstance)
 
     if (scrape.runners.length === 0) {
       return res.status(422).json({
@@ -346,7 +350,7 @@ app.post('/api/research', async (req, res) => {
 
     const numericDistance = Number(distance)
     const boxBiasStats = Number.isFinite(numericDistance)
-      ? getBoxBiasStats(db, meeting, numericDistance)
+      ? getBoxBiasStats(dbInstance, meeting, numericDistance)
       : null
 
     const enrichedRunners = scrape.runners.map(runner => ({
@@ -357,8 +361,19 @@ app.post('/api/research', async (req, res) => {
     }))
 
     const prediction = applyMode(enrichedRunners, mode)
+    const derivedGrade = enrichedRunners.map(runner => runner.grade).find(Boolean) || null
+    const aiStartedAt = Date.now()
+    const aiAnalysis = await analyseRaceFn(prediction.allScores, {
+      date,
+      track: meeting,
+      raceNumber,
+      distance: Number.isFinite(numericDistance) ? numericDistance : (prediction.runner.distanceMeters ?? null),
+      raceType,
+      grade: derivedGrade,
+    })
+    console.log(`[AI Analyst] ${meeting} R${raceNumber} completed in ${Date.now() - aiStartedAt}ms (${aiAnalysis ? 'available' : 'unavailable'})`)
 
-    const saved = savePrediction(db, {
+    const saved = savePrediction(dbInstance, {
       date,
       track:       meeting,
       race_number: raceNumber,
@@ -370,6 +385,8 @@ app.post('/api/research', async (req, res) => {
       confidence:  prediction.confidence,
       odds:        prediction.runner.odds ?? null,
       stake:       stake || 10,
+      ai_recommendation: aiAnalysis?.recommendation?.runner ?? null,
+      ai_agreed: aiAnalysis?.modelAgreement ?? null,
     })
 
     const sourcesConsulted = scrape.sources.map(source => ({
@@ -392,7 +409,7 @@ app.post('/api/research', async (req, res) => {
       return `${source.source}: ${status}`
     }).join('\n')
 
-    saveJournalEntry(db, {
+    saveJournalEntry(dbInstance, {
       prediction_id: saved.id,
       race_date: date,
       track: meeting,
@@ -404,6 +421,7 @@ app.post('/api/research', async (req, res) => {
       winner_box: prediction.runner.box ?? prediction.runner.barrier ?? null,
       winner_composite_score: prediction.score,
       winner_breakdown_json: prediction.breakdown,
+      ai_analysis_json: aiAnalysis,
       mode_used: mode,
       box_bias_source: prediction.boxBiasSource,
       raw_data_summary: rawDataSummary,
@@ -425,12 +443,16 @@ app.post('/api/research', async (req, res) => {
       sourcesUsed:    scrape.sourcesUsed,
       sourcesSkipped: scrape.sourcesSkipped,
       warning:        scrape.warning,
+      aiAnalysis,
     })
   } catch (err) {
     console.error('[/api/research]', err)
     res.status(500).json({ error: err.message })
   }
-})
+}
+
+// POST /api/research
+app.post('/api/research', handleResearchRequest)
 
 // GET /api/predictions
 app.get('/api/predictions', (req, res) => {
@@ -659,10 +681,14 @@ const resultCheckInterval = setInterval(async () => {
 
 resultCheckInterval.unref?.()
 
-async function shutdown() {
+async function closeAppResources() {
   clearInterval(resultCheckInterval)
   await closeBrowser()
   db.close()
+}
+
+async function shutdown() {
+  await closeAppResources()
   process.exit(0)
 }
 process.on('SIGTERM', shutdown)
@@ -674,4 +700,18 @@ if (process.env.NODE_ENV === 'production') {
   })
 }
 
-app.listen(PORT, () => console.log(`[RaceEdge API] http://localhost:${PORT}`))
+function startServer(port = PORT) {
+  return app.listen(port, () => console.log(`[RaceEdge API] http://localhost:${port}`))
+}
+
+if (require.main === module) {
+  startServer()
+}
+
+module.exports = {
+  app,
+  db,
+  startServer,
+  closeAppResources,
+  handleResearchRequest,
+}
