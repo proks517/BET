@@ -7,7 +7,9 @@ const {
   parseRacingAndSportsHtml,
   parseRacingAndSportsOddsHtml,
   fetchMeetingsForDate,
+  fetchMeetingsForDateDetailed,
   fetchGreyhoundResult,
+  filterUpcomingMeetingsForSelectedDate,
   mergeSources,
   mergeOddsIntoRunners,
 } = require('../scraper.js')
@@ -153,5 +155,48 @@ describe('fetchMeetingsForDate', () => {
     } finally {
       global.fetch = originalFetch
     }
+  })
+})
+
+describe('same-day meeting filtering', () => {
+  test('filters same-day meetings to upcoming-only based on first listed race time', async () => {
+    const originalFetch = global.fetch
+    const fixture = fix('thedogs-racecards.html')
+
+    global.fetch = async () => ({
+      ok: true,
+      status: 200,
+      text: async () => fixture,
+    })
+
+    try {
+      const result = await fetchMeetingsForDateDetailed('2026-03-30', 'greyhound', undefined, {
+        nowParts: { date: '2026-03-30', time: '18:30' },
+      })
+
+      assert.deepEqual(result.meetings, [
+        { track: 'Wentworth Park', slug: 'wentworth-park', raceCount: 10, firstRaceTime: '19:05' },
+      ])
+      assert.equal(result.diagnostics.upcomingOnlyApplied, true)
+      assert.equal(result.diagnostics.matchedDateCount, 2)
+      assert.equal(result.diagnostics.keptCount, 1)
+      assert.equal(result.diagnostics.skippedPastCount, 1)
+      assert.deepEqual(result.diagnostics.skippedPastTracks, ['Richmond'])
+    } finally {
+      global.fetch = originalFetch
+    }
+  })
+
+  test('excludes same-day meetings with missing times when strict filtering is applied', () => {
+    const result = filterUpcomingMeetingsForSelectedDate('2026-03-30', [
+      { track: 'Richmond', raceCount: 12, firstRaceTime: null },
+      { track: 'Wentworth Park', raceCount: 10, firstRaceTime: '19:05' },
+    ], { date: '2026-03-30', time: '18:30' })
+
+    assert.deepEqual(result.meetings, [
+      { track: 'Wentworth Park', raceCount: 10, firstRaceTime: '19:05' },
+    ])
+    assert.equal(result.diagnostics.skippedMissingTimeCount, 1)
+    assert.deepEqual(result.diagnostics.skippedMissingTimeTracks, ['Richmond'])
   })
 })

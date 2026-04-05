@@ -58,6 +58,11 @@ function getPickKey(pick) {
   return `${pick.mode}-${pick.track}-${pick.raceNumber}-${pick.runnerName}`
 }
 
+function formatTrackList(tracks = []) {
+  if (!tracks.length) return ''
+  return tracks.join(', ')
+}
+
 export default function App() {
   const [scanDate, setScanDate] = useState(todayStr())
   const [scanLoading, setScanLoading] = useState(false)
@@ -214,7 +219,19 @@ export default function App() {
         closeStream()
         setScanLoading(false)
         setScanResult(payload)
-        appendScanLog(`Scan complete: ${payload.totalRacesScanned} races assessed.`)
+        if ((payload.totalMeetings || 0) === 0) {
+          setNotice(payload.meetingDiagnostics?.reason || `No greyhound meetings were found for ${scanDate}.`)
+          setScanProgress(current => ({
+            ...current,
+            currentTrack: 'No meetings found',
+          }))
+          appendScanLog(payload.meetingDiagnostics?.reason || `No greyhound meetings found for ${scanDate}.`)
+        } else if ((payload.meetingDiagnostics?.skippedPastCount || 0) > 0 || (payload.meetingDiagnostics?.skippedMissingTimeCount || 0) > 0) {
+          setNotice(payload.meetingDiagnostics?.reason || '')
+          appendScanLog(payload.meetingDiagnostics?.reason || 'Same-day upcoming filter skipped some meetings.')
+        } else {
+          appendScanLog(`Scan complete: ${payload.totalRacesScanned} races assessed.`)
+        }
         return
       }
 
@@ -401,6 +418,37 @@ export default function App() {
                   <div key={`${entry}-${index}`} className="scan-log-line">{entry}</div>
                 ))}
               </div>
+            </div>
+          )}
+
+          {scanResult?.meetingDiagnostics && (
+            scanResult.totalMeetings === 0 ||
+            (scanResult.meetingDiagnostics.skippedPastCount || 0) > 0 ||
+            (scanResult.meetingDiagnostics.skippedMissingTimeCount || 0) > 0
+          ) && (
+            <div className="scan-diagnostics">
+              <div className="section-subtitle">Scan diagnostics</div>
+              <p>{scanResult.meetingDiagnostics.reason}</p>
+              {scanResult.meetingDiagnostics.note && (
+                <p>{scanResult.meetingDiagnostics.note}</p>
+              )}
+              <p>
+                Source matched {scanResult.meetingDiagnostics.matchedDateCount || 0} meetings for {scanResult.date}.
+                Kept {scanResult.meetingDiagnostics.keptCount || 0}.
+                Skipped {scanResult.meetingDiagnostics.skippedPastCount || 0} already-started meetings
+                and {scanResult.meetingDiagnostics.skippedMissingTimeCount || 0} meetings with no reliable first listed race time.
+              </p>
+              {scanResult.meetingDiagnostics.currentDate === scanResult.date && (
+                <p>
+                  Same-day comparison used {scanResult.meetingDiagnostics.currentTime} in {scanResult.meetingDiagnostics.timezone}.
+                </p>
+              )}
+              {!!scanResult.meetingDiagnostics.skippedPastTracks?.length && (
+                <p>Skipped as already started: {formatTrackList(scanResult.meetingDiagnostics.skippedPastTracks)}</p>
+              )}
+              {!!scanResult.meetingDiagnostics.skippedMissingTimeTracks?.length && (
+                <p>Skipped because time was unavailable: {formatTrackList(scanResult.meetingDiagnostics.skippedMissingTimeTracks)}</p>
+              )}
             </div>
           )}
         </section>

@@ -11,6 +11,7 @@ const { logScraperHealth } = require('./database.js')
 const FETCH_TIMEOUT = parseInt(process.env.FETCH_TIMEOUT, 10) || 10000
 const PUPPETEER_NAV_TIMEOUT = parseInt(process.env.PUPPETEER_NAV_TIMEOUT, 10) || 15000
 const PUPPETEER_WAIT_TIMEOUT = parseInt(process.env.PUPPETEER_WAIT_TIMEOUT, 10) || 5000
+const APP_TIMEZONE = process.env.APP_TIMEZONE || 'Australia/Sydney'
 
 async function fetchWithRetry(url, opts, retries = 1, backoffMs = 1000) {
   for (let attempt = 0; attempt <= retries; attempt++) {
@@ -188,6 +189,24 @@ function normalizeDateText(value) {
   }
 
   return null
+}
+
+function getAppNowParts(now = new Date()) {
+  const date = new Intl.DateTimeFormat('en-CA', {
+    timeZone: APP_TIMEZONE,
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+  }).format(now)
+
+  const time = new Intl.DateTimeFormat('en-GB', {
+    timeZone: APP_TIMEZONE,
+    hour: '2-digit',
+    minute: '2-digit',
+    hour12: false,
+  }).format(now)
+
+  return { date, time }
 }
 
 function extractInteger(value) {
@@ -667,7 +686,77 @@ function parseMeetingsForDateHtml(html, date) {
   return meetings
 }
 
+function filterUpcomingMeetingsForSelectedDate(date, meetings, nowParts = getAppNowParts()) {
+  const diagnostics = {
+    selectedDate: date,
+    currentDate: nowParts.date,
+    currentTime: nowParts.time,
+    timezone: APP_TIMEZONE,
+    matchedDateCount: meetings.length,
+    keptCount: meetings.length,
+    skippedPastCount: 0,
+    skippedMissingTimeCount: 0,
+    skippedPastTracks: [],
+    skippedMissingTimeTracks: [],
+    upcomingOnlyApplied: false,
+    filterBasis: 'selected_date',
+    reason: meetings.length > 0
+      ? 'Meetings matched the selected date.'
+      : 'The source page returned no meetings for the selected date.',
+  }
+
+  if (date !== nowParts.date) {
+    return { meetings, diagnostics }
+  }
+
+  diagnostics.upcomingOnlyApplied = true
+  diagnostics.filterBasis = 'meeting_first_race_time'
+
+  const filteredMeetings = []
+  for (const meeting of meetings) {
+    const firstRaceTime = normalizeTimeText(meeting.firstRaceTime)
+    if (!firstRaceTime) {
+      diagnostics.skippedMissingTimeCount += 1
+      diagnostics.skippedMissingTimeTracks.push(meeting.track)
+      continue
+    }
+
+    if (firstRaceTime <= nowParts.time) {
+      diagnostics.skippedPastCount += 1
+      diagnostics.skippedPastTracks.push(meeting.track)
+      continue
+    }
+
+    filteredMeetings.push(meeting)
+  }
+
+  diagnostics.keptCount = filteredMeetings.length
+
+  if (diagnostics.matchedDateCount === 0) {
+    diagnostics.reason = 'The source page returned no meetings for the selected date.'
+  } else if (filteredMeetings.length > 0) {
+    diagnostics.reason = `Same-day upcoming filter kept ${filteredMeetings.length} of ${diagnostics.matchedDateCount} meetings using each meeting's first listed race time.`
+  } else if (diagnostics.skippedPastCount > 0 && diagnostics.skippedMissingTimeCount === 0) {
+    diagnostics.reason = `All ${diagnostics.matchedDateCount} matched meetings were excluded because their first listed race time is already in the past in ${APP_TIMEZONE}.`
+  } else if (diagnostics.skippedMissingTimeCount > 0 && diagnostics.skippedPastCount === 0) {
+    diagnostics.reason = `Matched meetings were excluded because the source did not expose a reliable first listed race time for same-day filtering.`
+  } else {
+    diagnostics.reason = `Matched meetings were excluded because some had already started and others had no reliable first listed race time for same-day filtering.`
+  }
+
+  diagnostics.note = diagnostics.upcomingOnlyApplied
+    ? 'Same-day filtering currently uses each meeting\'s first listed race time because the meeting source does not expose reliable race-by-race start times at this stage.'
+    : null
+
+  return { meetings: filteredMeetings, diagnostics }
+}
+
 async function fetchMeetingsForDate(date, raceType, db) {
+  const detailed = await fetchMeetingsForDateDetailed(date, raceType, db)
+  return detailed.meetings
+}
+
+async function fetchMeetingsForDateDetailed(date, raceType, db, { nowParts } = {}) {
   const url = raceType === 'greyhound'
     ? 'https://www.thedogs.com.au/racing/racecards'
     : `https://www.racingandsports.com.au/${raceType === 'greyhound' ? 'greyhounds' : 'horse-racing'}/form/${date}`
@@ -677,29 +766,32 @@ async function fetchMeetingsForDate(date, raceType, db) {
   try {
     const key = `meetings-for-date|${date}|${raceType}`
     const cached = getCached(key)
-    if (cached) return cached
+    if (cached) {
+      return filterUpcomingMeetingsForSelectedDate(date, cached, nowParts)
+    }
 
     const res = await fetchWithRetry(url, FETCH_OPTS)
     const html = await res.text()
     const meetings = parseMeetingsForDateHtml(html, date)
+    const filtered = filterUpcomingMeetingsForSelectedDate(date, meetings, nowParts)
 
     saveScraperHealth(db, {
       source_name: sourceName,
       race_date: date,
       track: 'ALL',
       race_number: 0,
-      status: meetings.length > 0 ? 'success' : 'empty',
+      status: filtered.meetings.length > 0 ? 'success' : 'empty',
       response_time_ms: Math.max(0, Date.now() - startedAt),
-      records_returned: meetings.length,
+      records_returned: filtered.meetings.length,
       error_message: null,
     })
 
     if (meetings.length > 0) {
       setCache(key, meetings)
-      return meetings
+      return filtered
     }
 
-    return []
+    return filtered
   } catch (err) {
     saveScraperHealth(db, {
       source_name: sourceName,
@@ -711,7 +803,27 @@ async function fetchMeetingsForDate(date, raceType, db) {
       records_returned: 0,
       error_message: err.message,
     })
-    return []
+    return {
+      meetings: [],
+      diagnostics: {
+        selectedDate: date,
+        currentDate: (nowParts || getAppNowParts()).date,
+        currentTime: (nowParts || getAppNowParts()).time,
+        timezone: APP_TIMEZONE,
+        matchedDateCount: 0,
+        keptCount: 0,
+        skippedPastCount: 0,
+        skippedMissingTimeCount: 0,
+        skippedPastTracks: [],
+        skippedMissingTimeTracks: [],
+        upcomingOnlyApplied: date === (nowParts || getAppNowParts()).date,
+        filterBasis: date === (nowParts || getAppNowParts()).date ? 'meeting_first_race_time' : 'selected_date',
+        reason: `Meeting lookup failed: ${err.message}`,
+        note: date === (nowParts || getAppNowParts()).date
+          ? 'Same-day filtering currently uses each meeting\'s first listed race time because the meeting source does not expose reliable race-by-race start times at this stage.'
+          : null,
+      },
+    }
   }
 }
 
@@ -1159,12 +1271,14 @@ module.exports = {
   research,
   fetchMeetings,
   fetchMeetingsForDate,
+  fetchMeetingsForDateDetailed,
   fetchAllRacesForMeeting,
   closeBrowser,
   parseTheDogsHtml,
   parseRacingAndSportsHtml,
   parseRacingAndSportsOddsHtml,
   parseMeetingsForDateHtml,
+  filterUpcomingMeetingsForSelectedDate,
   parseGreyhoundResultHtml,
   parseHorseResultHtml,
   fetchGreyhoundResult,

@@ -128,4 +128,62 @@ describe('App', () => {
       expect(screen.getByText('Confirmed odds')).toBeTruthy()
     })
   })
+
+  it('shows no-meetings diagnostics when a scan finishes empty', async () => {
+    const fetchMock = buildFetchMock()
+    vi.stubGlobal('fetch', fetchMock)
+
+    let latestStream = null
+
+    class MockEventSource {
+      constructor(url) {
+        this.url = url
+        latestStream = this
+      }
+
+      close() {}
+    }
+
+    vi.stubGlobal('EventSource', MockEventSource)
+
+    render(<App />)
+
+    fireEvent.click((await screen.findAllByRole('button', { name: 'Run scan' }))[0])
+
+    latestStream.onmessage({
+      data: JSON.stringify({
+        type: 'complete',
+        date: '2026-03-31',
+        totalMeetings: 0,
+        totalRacesScanned: 0,
+        generatedAt: '2026-03-31T01:00:00.000Z',
+        meetingDiagnostics: {
+          selectedDate: '2026-03-31',
+          currentDate: '2026-03-31',
+          currentTime: '18:30',
+          timezone: 'Australia/Sydney',
+          matchedDateCount: 2,
+          keptCount: 0,
+          skippedPastCount: 1,
+          skippedMissingTimeCount: 1,
+          skippedPastTracks: ['Richmond'],
+          skippedMissingTimeTracks: ['Wentworth Park'],
+          upcomingOnlyApplied: true,
+          filterBasis: 'meeting_first_race_time',
+          reason: 'Matched meetings were excluded because some had already started and others had no reliable first listed race time for same-day filtering.',
+          note: 'Same-day filtering currently uses each meeting\'s first listed race time because the meeting source does not expose reliable race-by-race start times at this stage.',
+        },
+        picks: {
+          safest: [],
+          value: [],
+          longshot: [],
+        },
+      }),
+    })
+
+    expect((await screen.findAllByText(/Matched meetings were excluded because some had already started/)).length).toBeGreaterThan(0)
+    expect(screen.getByText(/Same-day comparison used 18:30 in Australia\/Sydney/)).toBeTruthy()
+    expect(screen.getByText(/Skipped as already started: Richmond/)).toBeTruthy()
+    expect(screen.getByText(/Skipped because time was unavailable: Wentworth Park/)).toBeTruthy()
+  })
 })

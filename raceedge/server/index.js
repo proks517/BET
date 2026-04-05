@@ -13,6 +13,7 @@ const {
 } = require('./database.js')
 const {
   fetchMeetingsForDate,
+  fetchMeetingsForDateDetailed,
   fetchAllRacesForMeeting,
   fetchGreyhoundResult,
   fetchHorseResult,
@@ -167,16 +168,27 @@ async function executeBestBetsScan({
   emit,
   dbInstance = db,
   fetchMeetingsForDateFn = fetchMeetingsForDate,
+  fetchMeetingsForDateDetailedFn = fetchMeetingsForDateDetailed,
   fetchAllRacesForMeetingFn = fetchAllRacesForMeeting,
   generateBestBetsFn = generateBestBets,
 } = {}) {
   const startedAt = Date.now()
-  const meetings = await fetchMeetingsForDateFn(date, type, dbInstance)
+  const shouldUseLegacyMeetingStub = (
+    fetchMeetingsForDateDetailedFn === fetchMeetingsForDateDetailed &&
+    fetchMeetingsForDateFn !== fetchMeetingsForDate
+  )
+  const meetingLookup = shouldUseLegacyMeetingStub
+    ? { meetings: await fetchMeetingsForDateFn(date, type, dbInstance), diagnostics: null }
+    : fetchMeetingsForDateDetailedFn
+      ? await fetchMeetingsForDateDetailedFn(date, type, dbInstance)
+      : { meetings: await fetchMeetingsForDateFn(date, type, dbInstance), diagnostics: null }
+  const meetings = meetingLookup.meetings || []
+  const meetingDiagnostics = meetingLookup.diagnostics || null
   const totalMeetings = meetings.length
   let totalRacesScanned = 0
   let allRaces = []
 
-  emit?.({ type: 'scan_start', totalMeetings })
+  emit?.({ type: 'scan_start', totalMeetings, meetingDiagnostics })
 
   for (const meeting of meetings) {
     emit?.({
@@ -224,6 +236,7 @@ async function executeBestBetsScan({
     totalMeetings,
     totalRacesScanned,
     picks: generateBestBetsFn(allRaces),
+    meetingDiagnostics,
     scanDurationMs: Date.now() - startedAt,
   })
 }
@@ -247,7 +260,7 @@ function getOrStartBestBetsScan({ date, type = 'greyhound' }) {
     const promise = executeBestBetsScan({ date, type, emit })
       .then(payload => {
         setCachedBestBets(key, payload)
-        const completePayload = { type: 'complete', cached: false, cacheAgeMinutes: 0, ...payload }
+        const completePayload = { ...payload, type: 'complete', cached: false, cacheAgeMinutes: 0 }
         emit(completePayload)
         return completePayload
       })
@@ -430,7 +443,11 @@ app.get('/api/best-bets/stream', async (req, res) => {
   })
 
   try {
-    await active.promise
+    const payload = await active.promise
+    if (!res.writableEnded) {
+      sendSse(res, payload)
+      res.end()
+    }
   } catch {
     if (!res.writableEnded) {
       res.end()

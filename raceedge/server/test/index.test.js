@@ -266,6 +266,32 @@ describe('executeBestBetsScan', () => {
     assert.equal(payload.picks.safest[0].sourceBadges[0].trustLabel, 'Stable')
     assert.equal(payload.picks.value[0].experimentalWarning, true)
     assert.equal(events[0].type, 'scan_start')
+    assert.equal(events[0].meetingDiagnostics, null)
     assert.ok(events.some(event => event.type === 'meeting_done'))
+  })
+})
+
+describe('/api/best-bets/stream', () => {
+  test('completes cleanly when the scan resolves immediately with zero meetings', async () => {
+    const originalFetch = global.fetch
+    const localFetch = originalFetch
+    global.fetch = async () => ({
+      ok: true,
+      status: 200,
+      text: async () => '<html><body><div>No meetings today</div></body></html>',
+    })
+
+    try {
+      const response = await localFetch(`${baseUrl}/api/best-bets/stream?date=2026-04-07&type=greyhound`)
+      const body = await response.text()
+
+      assert.equal(response.status, 200)
+      assert.match(body, /"type":"complete"/)
+      assert.match(body, /"totalMeetings":0/)
+      assert.match(body, /"totalRacesScanned":0/)
+      assert.match(body, /The source page returned no meetings for the selected date|Meeting lookup failed/)
+    } finally {
+      global.fetch = originalFetch
+    }
   })
 })

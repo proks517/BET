@@ -306,6 +306,20 @@ h3 {
   border: 1px solid rgba(82, 163, 255, 0.14);
 }
 
+.scan-diagnostics {
+  margin-top: 18px;
+  padding: 18px;
+  border-radius: 18px;
+  background: rgba(38, 25, 7, 0.26);
+  border: 1px solid rgba(245, 159, 66, 0.28);
+}
+
+.scan-diagnostics p {
+  margin-top: 10px;
+  color: var(--muted);
+  line-height: 1.5;
+}
+
 .scan-log-list {
   display: grid;
   gap: 10px;
