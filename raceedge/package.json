@@ -1,14 +1,16 @@
 {
   "name": "raceedge",
   "version": "1.0.0",
-  "description": "Australian racing research and prediction tracker",
+  "description": "Greyhound-first daily scan board with explicit bet tracking",
   "scripts": {
     "start": "node server/index.js",
     "dev": "concurrently \"npm run server\" \"npm run client\"",
     "server": "node --watch server/index.js",
     "client": "vite",
     "build": "vite build",
-    "test": "node --test server/test/database.test.js server/test/predictor.test.js server/test/scraper.test.js server/test/analyst.test.js server/test/index.test.js",
+    "test": "npm run test:server && npm run test:ui",
+    "test:server": "node --test server/test/database.test.js server/test/predictor.test.js server/test/scraper.test.js server/test/analyst.test.js server/test/index.test.js",
+    "test:ui": "vitest run --environment jsdom",
     "test:db": "node --test server/test/database.test.js",
     "test:analyst": "node --test server/test/analyst.test.js",
     "test:index": "node --test server/test/index.test.js",
@@ -23,10 +25,13 @@
     "puppeteer": "^22.4.0"
   },
   "devDependencies": {
+    "@testing-library/react": "^16.3.2",
     "@vitejs/plugin-react": "^4.2.1",
     "concurrently": "^8.2.2",
+    "jsdom": "^29.0.1",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
-    "vite": "^5.1.6"
+    "vite": "^5.1.6",
+    "vitest": "^4.1.2"
   }
 }

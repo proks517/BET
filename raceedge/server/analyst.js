@@ -1,5 +1,5 @@
 async function analyseRace(runners, raceContext) {
-  // AI Analyst disabled - set ANTHROPIC_API_KEY in .env and re-enable to activate
+  // AI analysis is intentionally disabled in the stability release.
   return null
 }
 

@@ -1,0 +1,213 @@
+{
+  "release": {
+    "channel": "stability",
+    "title": "Ease-of-Use Release",
+    "summary": "Greyhound-first daily scanning, simple bet confirmation, and a clean placed-bet ledger."
+  },
+  "features": [
+    {
+      "id": "bestBetsScan",
+      "label": "Scan Day",
+      "status": "stable",
+      "statusLabel": "Stable",
+      "note": "The main workflow scans a greyhound day and returns the top five safest, value, and longshot bets."
+    },
+    {
+      "id": "scoringModel",
+      "label": "Scoring Model",
+      "status": "stable",
+      "statusLabel": "Stable",
+      "note": "The six-factor scoring model still powers ranking and confidence across the three bet classes."
+    },
+    {
+      "id": "betLedger",
+      "label": "Placed Bet Ledger",
+      "status": "stable",
+      "statusLabel": "Stable",
+      "note": "Only explicitly confirmed bets are stored in the live ledger and included in P/L."
+    },
+    {
+      "id": "resultTracking",
+      "label": "Result Tracking",
+      "status": "stable",
+      "statusLabel": "Stable",
+      "note": "Placed bets support automatic result scraping plus manual win, loss, and scratched overrides."
+    },
+    {
+      "id": "autoResultResolution",
+      "label": "Auto Result Resolution",
+      "status": "stable",
+      "statusLabel": "Stable",
+      "note": "Automatic result resolution is active for the ledger, but still depends on source page availability and runner-name parity."
+    },
+    {
+      "id": "raceResearch",
+      "label": "Per-Race Research Console",
+      "status": "disabled",
+      "statusLabel": "Disabled",
+      "note": "The old per-race research workflow has been retired from the primary product."
+    },
+    {
+      "id": "journal",
+      "label": "Prediction Journal",
+      "status": "disabled",
+      "statusLabel": "Disabled",
+      "note": "Journal capture is no longer part of the simplified scan-and-stake workflow."
+    },
+    {
+      "id": "boxBiasAnalytics",
+      "label": "Box Bias Analytics",
+      "status": "disabled",
+      "statusLabel": "Disabled",
+      "note": "Dedicated box-bias tooling is no longer exposed in the primary product."
+    },
+    {
+      "id": "sourceHealth",
+      "label": "Source Health Dashboard",
+      "status": "disabled",
+      "statusLabel": "Disabled",
+      "note": "Source trust is now shown inline on picks instead of through a separate dashboard."
+    },
+    {
+      "id": "dockerRuntime",
+      "label": "Docker Runtime",
+      "status": "stable",
+      "statusLabel": "Stable",
+      "note": "Docker is supported through a multi-stage production image that builds the client before slimming the runtime."
+    },
+    {
+      "id": "launcherScripts",
+      "label": "Startup Scripts",
+      "status": "stable",
+      "statusLabel": "Stable",
+      "note": "The local launcher scripts still start the canonical raceedge app."
+    },
+    {
+      "id": "aiAnalyst",
+      "label": "AI Form Analyst",
+      "status": "disabled",
+      "statusLabel": "Disabled",
+      "note": "AI analysis remains intentionally disabled and is not part of the simplified product."
+    }
+  ],
+  "sources": {
+    "greyhound": [
+      {
+        "id": "thedogs",
+        "sourceName": "thedogs.com.au",
+        "displayName": "TheDogs",
+        "status": "stable",
+        "statusLabel": "Stable",
+        "note": "Primary greyhound source with parser, meeting, and result fixture coverage."
+      },
+      {
+        "id": "racingandsports",
+        "sourceName": "racingandsports.com.au",
+        "displayName": "Racing & Sports",
+        "status": "stable",
+        "statusLabel": "Stable",
+        "note": "Cross-code source with parser fixture coverage and active use in the merge."
+      },
+      {
+        "id": "grv",
+        "sourceName": "grv.org.au",
+        "displayName": "GRV",
+        "status": "experimental",
+        "statusLabel": "Experimental",
+        "note": "Best-effort static scraper with sparse coverage; keep visible with warning badges."
+      },
+      {
+        "id": "tab",
+        "sourceName": "tab.com.au",
+        "displayName": "TAB",
+        "status": "experimental",
+        "statusLabel": "Experimental",
+        "note": "Puppeteer-backed market and form scrape; selectors may drift with site changes."
+      },
+      {
+        "id": "greyhoundrecorder",
+        "sourceName": "thegreyhoundrecorder.com.au",
+        "displayName": "Greyhound Recorder",
+        "status": "experimental",
+        "statusLabel": "Experimental",
+        "note": "Supplementary source retained for extra coverage, not as a primary trust source."
+      },
+      {
+        "id": "gbota",
+        "sourceName": "gbota.com.au",
+        "displayName": "GBOTA",
+        "status": "experimental",
+        "statusLabel": "Experimental",
+        "note": "Supplementary source with limited reliability evidence."
+      }
+    ],
+    "horse": [
+      {
+        "id": "racingaustralia",
+        "sourceName": "racingaustralia.horse",
+        "displayName": "Racing Australia",
+        "status": "experimental",
+        "statusLabel": "Experimental",
+        "note": "Horse support remains secondary and is not surfaced in the simplified UI."
+      },
+      {
+        "id": "racingandsports",
+        "sourceName": "racingandsports.com.au",
+        "displayName": "Racing & Sports",
+        "status": "stable",
+        "statusLabel": "Stable",
+        "note": "Horse support remains secondary and is not surfaced in the simplified UI."
+      },
+      {
+        "id": "tab",
+        "sourceName": "tab.com.au",
+        "displayName": "TAB",
+        "status": "experimental",
+        "statusLabel": "Experimental",
+        "note": "Horse support remains secondary and is not surfaced in the simplified UI."
+      },
+      {
+        "id": "racenet",
+        "sourceName": "racenet.com.au",
+        "displayName": "Racenet",
+        "status": "experimental",
+        "statusLabel": "Experimental",
+        "note": "Horse support remains secondary and is not surfaced in the simplified UI."
+      },
+      {
+        "id": "punters",
+        "sourceName": "punters.com.au",
+        "displayName": "Punters",
+        "status": "experimental",
+        "statusLabel": "Experimental",
+        "note": "Horse support remains secondary and is not surfaced in the simplified UI."
+      }
+    ],
+    "odds": [
+      {
+        "id": "tab",
+        "sourceName": "tab",
+        "displayName": "TAB",
+        "status": "experimental",
+        "statusLabel": "Experimental",
+        "note": "Primary odds fallback today, but still sensitive to selector drift."
+      },
+      {
+        "id": "ladbrokes",
+        "sourceName": "ladbrokes",
+        "displayName": "Ladbrokes",
+        "status": "experimental",
+        "statusLabel": "Experimental",
+        "note": "HTML parsing path retained as a market backup."
+      },
+      {
+        "id": "neds",
+        "sourceName": "neds",
+        "displayName": "Neds",
+        "status": "experimental",
+        "statusLabel": "Experimental",
+        "note": "Puppeteer-backed market backup retained for manual review if needed."
+      }
+    ]
+  }
+}

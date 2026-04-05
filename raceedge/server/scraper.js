@@ -1163,6 +1163,7 @@ module.exports = {
   closeBrowser,
   parseTheDogsHtml,
   parseRacingAndSportsHtml,
+  parseRacingAndSportsOddsHtml,
   parseMeetingsForDateHtml,
   parseGreyhoundResultHtml,
   parseHorseResultHtml,
@@ -1170,4 +1171,5 @@ module.exports = {
   fetchHorseResult,
   fetchOddsForRace,
   mergeSources,
+  mergeOddsIntoRunners,
 }

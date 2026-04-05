@@ -1,59 +1,45 @@
 const express = require('express')
-const cors    = require('cors')
-const path    = require('path')
+const cors = require('cors')
+const path = require('path')
 const {
   initDb,
   getPrediction,
   savePrediction,
   getPredictions,
-  updatePredictionSelection,
-  updateJournalSelection,
+  getBetLedgerSummary,
   updateResult,
   getPendingPredictions,
   autoResolveResult,
-  getStats,
-  getStatsByTrack,
-  getStatsByGrade,
-  getStatsByBox,
-  getStatsByMonth,
-  getCalibrationData,
-  getStreakData,
-  getProfitCurve,
-  getScraperStats,
-  getBoxBiasStats,
-  saveJournalEntry,
-  getJournalEntry,
-  getJournalHistory,
-  getDailyBriefing,
 } = require('./database.js')
 const {
-  research,
-  fetchMeetings,
   fetchMeetingsForDate,
   fetchAllRacesForMeeting,
   fetchGreyhoundResult,
   fetchHorseResult,
-  fetchOddsForRace,
   closeBrowser,
 } = require('./scraper.js')
-const { applyMode, generateBestBets, getDefaultBoxBiasTable } = require('./predictor.js')
-const { analyseRace } = require('./analyst.js')
+const { generateBestBets } = require('./predictor.js')
+const { getCapabilityMatrix, getFeatureMeta, getReleaseInfo, getSourceMeta } = require('./capabilities.js')
 
-const app  = express()
+const app = express()
 const PORT = process.env.PORT || 3001
 const RESULT_CHECK_INTERVAL_MS = 30 * 60 * 1000
 const BEST_BETS_CACHE_TTL_MS = 30 * 60 * 1000
-
+const CLIENT_DIST_PATH = path.join(__dirname, '..', 'dist')
+const RELEASE_INFO = getReleaseInfo()
+const AI_ANALYST_CAPABILITY = getFeatureMeta('aiAnalyst')
 const CORS_ORIGIN = process.env.CORS_ORIGIN || 'http://localhost:5173'
+
 app.use(cors({ origin: CORS_ORIGIN === '*' ? true : CORS_ORIGIN }))
 app.use(express.json())
 
 if (process.env.NODE_ENV === 'production') {
-  app.use(express.static(path.join(__dirname, '..', 'dist')))
+  app.use(express.static(CLIENT_DIST_PATH))
 }
 
 const db = initDb()
 console.log('[RaceEdge] Database ready')
+
 let activeResultCheck = null
 const bestBetsCache = new Map()
 const activeBestBetsScans = new Map()
@@ -62,8 +48,93 @@ function sleep(ms) {
   return new Promise(resolve => setTimeout(resolve, ms))
 }
 
-function getBestBetsCacheKey(date, type, mode) {
-  return `${date}|${type}|${mode}`
+function sendSse(res, payload) {
+  res.write(`data: ${JSON.stringify(payload)}\n\n`)
+}
+
+function parsePositiveNumber(value) {
+  const numeric = Number(value)
+  return Number.isFinite(numeric) && numeric > 0 ? numeric : null
+}
+
+function parseOptionalNumber(value) {
+  const numeric = Number(value)
+  return Number.isFinite(numeric) ? numeric : null
+}
+
+function getConfidenceLabel(confidence) {
+  const numeric = Number(confidence) || 0
+  if (numeric >= 80) return 'High'
+  if (numeric >= 65) return 'Medium'
+  return 'Low'
+}
+
+function buildSourceBadges(sourceNames = []) {
+  const uniqueSourceNames = Array.from(new Set(sourceNames.filter(Boolean)))
+
+  return uniqueSourceNames.map(sourceName => {
+    const metadata = getSourceMeta(sourceName) || {}
+    return {
+      sourceName,
+      displayName: metadata.displayName || sourceName,
+      trustStatus: metadata.status || 'experimental',
+      trustLabel: metadata.statusLabel || 'Experimental',
+      note: metadata.note || 'No source reliability note recorded.',
+    }
+  })
+}
+
+function decoratePick(pick) {
+  const sourceBadges = buildSourceBadges(pick.sourcesUsed)
+
+  return {
+    ...pick,
+    confidenceLabel: getConfidenceLabel(pick.confidence),
+    sourceBadges,
+    experimentalWarning: sourceBadges.some(source => source.trustStatus === 'experimental'),
+  }
+}
+
+function decorateScanPayload(payload) {
+  return {
+    ...payload,
+    picks: {
+      safest: (payload.picks?.safest || []).map(decoratePick),
+      value: (payload.picks?.value || []).map(decoratePick),
+      longshot: (payload.picks?.longshot || []).map(decoratePick),
+    },
+  }
+}
+
+function formatBetResponse(bet) {
+  return {
+    id: bet.id,
+    date: bet.date,
+    track: bet.track,
+    raceNumber: bet.race_number,
+    raceType: bet.race_type,
+    raceGrade: bet.race_grade,
+    runnerName: bet.runner,
+    box: bet.box_barrier,
+    mode: bet.mode,
+    confidence: bet.confidence,
+    confidenceLabel: getConfidenceLabel(bet.confidence),
+    stake: bet.stake,
+    confirmedOdds: bet.odds,
+    oddsSource: bet.odds_source,
+    winProbability: bet.win_probability,
+    ev: bet.ev,
+    expectedReturn: bet.expected_return,
+    result: bet.result,
+    pnl: bet.pnl,
+    placedAt: bet.placed_at,
+    resolvedAutomatically: bet.resolved_automatically,
+    defaultOddsUsed: bet.default_odds_used,
+  }
+}
+
+function getBestBetsCacheKey(date, type) {
+  return `${date}|${type}`
 }
 
 function getCachedBestBets(key) {
@@ -90,75 +161,17 @@ function setCachedBestBets(key, payload) {
   })
 }
 
-function getCurrentDateString() {
-  return new Intl.DateTimeFormat('en-CA', { timeZone: 'Australia/Sydney' }).format(new Date())
-}
-
-function getBriefingUpcomingRaces(date = getCurrentDateString()) {
-  const now = Date.now()
-  let latestEntry = null
-
-  for (const entry of bestBetsCache.values()) {
-    if (!entry?.payload || entry.payload.date !== date) continue
-    if ((now - entry.cachedAt) >= BEST_BETS_CACHE_TTL_MS) continue
-    if (!latestEntry || entry.cachedAt > latestEntry.cachedAt) {
-      latestEntry = entry
-    }
-  }
-
-  if (!latestEntry?.payload?.picks) return []
-
-  const modeOrder = ['safest', 'value', 'longshot']
-  return modeOrder
-    .map(mode => {
-      const pick = latestEntry.payload.picks?.[mode]?.[0]
-      if (!pick) return null
-
-      return {
-        track: pick.track,
-        raceNumber: pick.raceNumber,
-        runner: pick.runnerName,
-        box: pick.box ?? null,
-        mode,
-        ev: pick.ev ?? null,
-        decimalOdds: pick.decimalOdds ?? null,
-        estimatedStartTime: pick.estimatedStartTime ?? null,
-        raceType: latestEntry.payload.type,
-        distance: pick.distance ?? null,
-      }
-    })
-    .filter(Boolean)
-}
-
-function parseClockMinutes(value) {
-  if (!value) return null
-  const match = String(value).match(/^(\d{1,2}):(\d{2})$/)
-  if (!match) return null
-  return (parseInt(match[1], 10) * 60) + parseInt(match[2], 10)
-}
-
-function formatClockMinutes(totalMinutes) {
-  if (!Number.isFinite(totalMinutes)) return null
-  const wrapped = ((Math.round(totalMinutes) % (24 * 60)) + (24 * 60)) % (24 * 60)
-  const hours = String(Math.floor(wrapped / 60)).padStart(2, '0')
-  const minutes = String(wrapped % 60).padStart(2, '0')
-  return `${hours}:${minutes}`
-}
-
-function estimateStartTime(firstRaceTime, raceNumber, raceType) {
-  const baseMinutes = parseClockMinutes(firstRaceTime)
-  if (baseMinutes == null || !Number.isFinite(Number(raceNumber))) return firstRaceTime || null
-  const spacingMinutes = raceType === 'horse' ? 30 : 20
-  return formatClockMinutes(baseMinutes + ((Number(raceNumber) - 1) * spacingMinutes))
-}
-
-function sendSse(res, payload) {
-  res.write(`data: ${JSON.stringify(payload)}\n\n`)
-}
-
-async function executeBestBetsScan({ date, type, mode, emit }) {
+async function executeBestBetsScan({
+  date,
+  type = 'greyhound',
+  emit,
+  dbInstance = db,
+  fetchMeetingsForDateFn = fetchMeetingsForDate,
+  fetchAllRacesForMeetingFn = fetchAllRacesForMeeting,
+  generateBestBetsFn = generateBestBets,
+} = {}) {
   const startedAt = Date.now()
-  const meetings = await fetchMeetingsForDate(date, type, db)
+  const meetings = await fetchMeetingsForDateFn(date, type, dbInstance)
   const totalMeetings = meetings.length
   let totalRacesScanned = 0
   let allRaces = []
@@ -173,12 +186,12 @@ async function executeBestBetsScan({ date, type, mode, emit }) {
       totalMeetings,
     })
 
-    const meetingRaces = await fetchAllRacesForMeeting(
+    const meetingRaces = await fetchAllRacesForMeetingFn(
       date,
       meeting.track,
       meeting.raceCount,
       type,
-      db,
+      dbInstance,
       progressEvent => {
         if (progressEvent.type === 'race_done') {
           totalRacesScanned += 1
@@ -186,18 +199,13 @@ async function executeBestBetsScan({ date, type, mode, emit }) {
 
         emit?.({
           ...progressEvent,
-          totalRacesScanned,
           totalMeetings,
+          totalRacesScanned,
         })
       }
     )
 
-    const enrichedRaces = meetingRaces.map(race => ({
-      ...race,
-      estimatedStartTime: estimateStartTime(meeting.firstRaceTime, race.raceNumber, type),
-    }))
-
-    allRaces = allRaces.concat(enrichedRaces)
+    allRaces = allRaces.concat(meetingRaces)
 
     emit?.({
       type: 'meeting_done',
@@ -208,20 +216,20 @@ async function executeBestBetsScan({ date, type, mode, emit }) {
     })
   }
 
-  return {
+  return decorateScanPayload({
     generatedAt: new Date().toISOString(),
     date,
     type,
     mode: 'all',
-    totalRacesScanned,
     totalMeetings,
-    picks: generateBestBets(allRaces),
+    totalRacesScanned,
+    picks: generateBestBetsFn(allRaces),
     scanDurationMs: Date.now() - startedAt,
-  }
+  })
 }
 
-function getOrStartBestBetsScan({ date, type, mode }) {
-  const key = getBestBetsCacheKey(date, type, mode)
+function getOrStartBestBetsScan({ date, type = 'greyhound' }) {
+  const key = getBestBetsCacheKey(date, type)
   const cached = getCachedBestBets(key)
   if (cached) {
     return { key, cached }
@@ -236,7 +244,7 @@ function getOrStartBestBetsScan({ date, type, mode }) {
       }
     }
 
-    const promise = executeBestBetsScan({ date, type, mode, emit })
+    const promise = executeBestBetsScan({ date, type, emit })
       .then(payload => {
         setCachedBestBets(key, payload)
         const completePayload = { type: 'complete', cached: false, cacheAgeMinutes: 0, ...payload }
@@ -260,10 +268,11 @@ function getOrStartBestBetsScan({ date, type, mode }) {
 }
 
 function getResultSourceConfig(prediction) {
-  if (prediction.race_type === 'greyhound') {
-    return { source: 'thedogs', fetcher: fetchGreyhoundResult }
+  if (prediction.race_type === 'horse') {
+    return { source: 'racingandsports', fetcher: fetchHorseResult }
   }
-  return { source: 'racingandsports', fetcher: fetchHorseResult }
+
+  return { source: 'thedogs', fetcher: fetchGreyhoundResult }
 }
 
 async function runPendingResultCheck() {
@@ -302,7 +311,7 @@ async function runPendingResultCheck() {
         resultData = await fetcher(prediction.date, prediction.track, prediction.race_number)
       } catch (err) {
         summary.errors.push({
-          predictionId: prediction.id,
+          betId: prediction.id,
           track: prediction.track,
           raceNumber: prediction.race_number,
           source,
@@ -311,18 +320,7 @@ async function runPendingResultCheck() {
         continue
       }
 
-      if (resultData == null) {
-        summary.errors.push({
-          predictionId: prediction.id,
-          track: prediction.track,
-          raceNumber: prediction.race_number,
-          source,
-          error: 'Result page unavailable',
-        })
-        continue
-      }
-
-      if (!resultData.finished || !resultData.winner) {
+      if (!resultData?.finished || !resultData.winner) {
         continue
       }
 
@@ -331,11 +329,11 @@ async function runPendingResultCheck() {
         summary.resolved += 1
       } else {
         summary.errors.push({
-          predictionId: prediction.id,
+          betId: prediction.id,
           track: prediction.track,
           raceNumber: prediction.race_number,
           source,
-          error: 'Prediction could not be resolved',
+          error: 'Bet could not be resolved',
         })
       }
     }
@@ -349,313 +347,38 @@ async function runPendingResultCheck() {
   return activeResultCheck
 }
 
-function formatResultCheckSummary(summary) {
-  return `checked=${summary.checked}, resolved=${summary.resolved}, stillPending=${summary.stillPending}, errors=${summary.errors.length}`
-}
-
-function mergeManualOddsIntoRunners(runners, oddsRows) {
-  if (!Array.isArray(runners) || runners.length === 0) return []
-  const byBox = new Map()
-  const byName = new Map()
-
-  for (const row of oddsRows || []) {
-    const box = Number(row.box)
-    if (Number.isFinite(box) && !byBox.has(box)) {
-      byBox.set(box, row)
-    }
-
-    const normalizedName = String(row.runnerName || '').trim().toLowerCase()
-    if (normalizedName && !byName.has(normalizedName)) {
-      byName.set(normalizedName, row)
-    }
-  }
-
-  return runners.map(runner => {
-    const box = Number(runner.box ?? runner.barrier)
-    const byBoxMatch = Number.isFinite(box) ? byBox.get(box) : null
-    const byNameMatch = byName.get(String(runner.name || '').trim().toLowerCase())
-    const matched = byBoxMatch || byNameMatch
-
-    if (!matched) return runner
-
-    return {
-      ...runner,
-      odds: Number(matched.decimalOdds),
-      decimalOdds: Number(matched.decimalOdds),
-      oddsSource: 'manual',
-    }
-  })
-}
-
-function buildResearchResponse(savedPrediction, prediction, scrape, aiAnalysis, distance) {
-  const topPick = prediction.picks[0]
-
-  return {
-    predictionId: savedPrediction.id,
-    mode: prediction.mode,
-    oddsAvailable: prediction.oddsAvailable,
-    oddsSource: prediction.oddsSource,
-    picks: prediction.picks,
-    allRunners: prediction.allRunners,
-    allScores: prediction.allRunners,
-    runner: topPick.name,
-    box: topPick.box,
-    barrier: topPick.barrier,
-    distance: Number.isFinite(distance) ? distance : null,
-    odds: topPick.decimalOdds,
-    score: topPick.compositeScore,
-    confidence: topPick.confidence,
-    breakdown: topPick.breakdown,
-    boxBiasSource: topPick.boxBiasSource,
-    reasoning: topPick.summary,
-    sourcesUsed: scrape.sourcesUsed,
-    sourcesSkipped: scrape.sourcesSkipped,
-    warning: scrape.warning,
-    aiAnalysis,
-  }
-}
-
 app.get('/api/health', (req, res) => {
   try {
     db.prepare('SELECT 1').get()
-    res.json({ status: 'ok', uptime: process.uptime() })
+    res.json({
+      status: 'ok',
+      uptime: process.uptime(),
+      release: RELEASE_INFO,
+      aiAnalyst: AI_ANALYST_CAPABILITY,
+    })
   } catch (err) {
     res.status(503).json({ status: 'error', error: err.message })
   }
 })
 
-// GET /api/meetings?date=YYYY-MM-DD&type=greyhound|horse
-app.get('/api/meetings', async (req, res) => {
-  const { date, type } = req.query
-  if (!date || !type) return res.status(400).json({ error: 'date and type are required' })
-  try {
-    res.json({ meetings: await fetchMeetings(date, type, db) })
-  } catch (err) {
-    res.status(500).json({ error: err.message })
-  }
+app.get('/api/capabilities', (req, res) => {
+  res.json(getCapabilityMatrix())
 })
 
-// GET /api/races?meeting=<name>
-app.get('/api/races', (req, res) => {
-  if (!req.query.meeting) return res.status(400).json({ error: 'meeting is required' })
-  res.json({ races: Array.from({ length: 12 }, (_, i) => i + 1) })
-})
-
-async function handleResearchRequest(req, res, {
-  researchFn = research,
-  analyseRaceFn = analyseRace,
-  dbInstance = db,
-} = {}) {
-  const { date, meeting, raceNumber, raceType, mode, stake, distance } = req.body
-  if (!date || !meeting || !raceNumber || !raceType || !mode) {
-    return res.status(400).json({ error: 'date, meeting, raceNumber, raceType, mode are all required' })
-  }
-  try {
-    const scrape = await researchFn(date, meeting, raceNumber, raceType, dbInstance)
-
-    if (scrape.runners.length === 0) {
-      return res.status(422).json({
-        error: 'No runner data retrieved from any source',
-        sources: scrape.sources,
-        sourcesSkipped: scrape.sourcesSkipped,
-        warning: scrape.warning,
-      })
-    }
-
-    const numericDistance = Number(distance)
-    const boxBiasStats = Number.isFinite(numericDistance)
-      ? getBoxBiasStats(dbInstance, meeting, numericDistance)
-      : null
-
-    const enrichedRunners = scrape.runners.map(runner => ({
-      ...runner,
-      distanceMeters: Number.isFinite(numericDistance) ? numericDistance : runner.distanceMeters,
-      raceType,
-      boxBiasData: boxBiasStats,
-    }))
-
-    const prediction = applyMode(enrichedRunners, mode)
-    const topPick = prediction.picks[0]
-    const derivedGrade = enrichedRunners.map(runner => runner.grade).find(Boolean) || null
-    const aiStartedAt = Date.now()
-    const aiAnalysis = await analyseRaceFn(prediction.allRunners, {
-      date,
-      track: meeting,
-      raceNumber,
-      distance: Number.isFinite(numericDistance) ? numericDistance : (topPick?.runnerData?.distanceMeters ?? null),
-      raceType,
-      grade: derivedGrade,
-    })
-    console.log(`[AI Analyst] ${meeting} R${raceNumber} completed in ${Date.now() - aiStartedAt}ms (${aiAnalysis ? 'available' : 'unavailable'})`)
-
-    const saved = savePrediction(dbInstance, {
-      date,
-      track:       meeting,
-      race_number: raceNumber,
-      race_type:   raceType,
-      race_grade:  derivedGrade,
-      race_distance: Number.isFinite(numericDistance) ? numericDistance : null,
-      runner:      topPick.name,
-      box_barrier: topPick.box ?? topPick.barrier ?? null,
-      mode,
-      confidence:  topPick.confidence,
-      odds:        topPick.decimalOdds ?? null,
-      odds_source: topPick.oddsSource ?? null,
-      win_probability: topPick.winProbability ?? null,
-      ev: topPick.ev ?? null,
-      expected_return: topPick.expectedReturn ?? null,
-      stake:       stake || 10,
-      ai_recommendation: aiAnalysis?.recommendation?.runner ?? null,
-      ai_agreed: aiAnalysis?.modelAgreement ?? null,
-    })
-
-    const sourcesConsulted = scrape.sources.map(source => ({
-      source: source.source,
-      status: source.error
-        ? 'error'
-        : source.runners.length > 0
-          ? 'success'
-          : 'empty',
-      recordsReturned: source.runners.length,
-      error: source.error || null,
-    }))
-
-    const rawDataSummary = scrape.sources.map(source => {
-      const status = source.error
-        ? `error - ${source.error}`
-        : source.runners.length > 0
-          ? `success (${source.runners.length} runners)`
-          : 'empty (0 runners)'
-      return `${source.source}: ${status}`
-    }).join('\n')
-
-    saveJournalEntry(dbInstance, {
-      prediction_id: saved.id,
-      race_date: date,
-      track: meeting,
-      race_number: raceNumber,
-      race_distance: Number.isFinite(numericDistance) ? numericDistance : null,
-      all_runners_json: prediction.allRunners,
-      sources_consulted_json: sourcesConsulted,
-      winner_name: topPick.name,
-      winner_box: topPick.box ?? topPick.barrier ?? null,
-      winner_composite_score: topPick.compositeScore,
-      winner_breakdown_json: topPick.breakdown,
-      ai_analysis_json: aiAnalysis,
-      mode_used: mode,
-      box_bias_source: prediction.boxBiasSource,
-      raw_data_summary: rawDataSummary,
-    })
-
-    res.json(buildResearchResponse(saved, prediction, scrape, aiAnalysis, numericDistance))
-  } catch (err) {
-    console.error('[/api/research]', err)
-    res.status(500).json({ error: err.message })
-  }
-}
-
-// POST /api/research
-app.post('/api/research', handleResearchRequest)
-
-// POST /api/apply-odds
-app.post('/api/apply-odds', (req, res) => {
-  const predictionId = Number(req.body?.predictionId)
-  const oddsRows = Array.isArray(req.body?.odds) ? req.body.odds : null
-
-  if (!Number.isInteger(predictionId) || predictionId < 1) {
-    return res.status(400).json({ error: 'predictionId must be a positive integer' })
-  }
-
-  if (!oddsRows) {
-    return res.status(400).json({ error: 'odds must be an array' })
-  }
-
-  try {
-    const predictionRow = getPrediction(db, predictionId)
-    if (!predictionRow) {
-      return res.status(404).json({ error: 'Prediction not found' })
-    }
-
-    const journalEntry = getJournalEntry(db, predictionId)
-    if (!journalEntry?.all_runners?.length) {
-      return res.status(404).json({ error: 'Cached runner data not found for this prediction' })
-    }
-
-    const updatedRunners = mergeManualOddsIntoRunners(journalEntry.all_runners, oddsRows)
-    const recalculated = applyMode(updatedRunners, predictionRow.mode)
-    const topPick = recalculated.picks[0]
-
-    const updatedPrediction = updatePredictionSelection(db, predictionId, {
-      runner: topPick.name,
-      box_barrier: topPick.box ?? topPick.barrier ?? null,
-      confidence: topPick.confidence,
-      odds: topPick.decimalOdds ?? null,
-      odds_source: topPick.oddsSource ?? null,
-      win_probability: topPick.winProbability ?? null,
-      ev: topPick.ev ?? null,
-      expected_return: topPick.expectedReturn ?? null,
-    })
-
-    updateJournalSelection(db, predictionId, {
-      all_runners_json: recalculated.allRunners,
-      winner_name: topPick.name,
-      winner_box: topPick.box ?? topPick.barrier ?? null,
-      winner_composite_score: topPick.compositeScore,
-      winner_breakdown_json: topPick.breakdown,
-      mode_used: predictionRow.mode,
-    })
-
-    res.json({
-      predictionId,
-      mode: predictionRow.mode,
-      oddsAvailable: recalculated.oddsAvailable,
-      oddsSource: recalculated.oddsSource,
-      picks: recalculated.picks,
-      allRunners: recalculated.allRunners,
-      allScores: recalculated.allRunners,
-      runner: topPick.name,
-      box: topPick.box,
-      barrier: topPick.barrier,
-      odds: topPick.decimalOdds,
-      score: topPick.compositeScore,
-      confidence: topPick.confidence,
-      breakdown: topPick.breakdown,
-      boxBiasSource: topPick.boxBiasSource,
-      reasoning: topPick.summary,
-      updatedPrediction,
-    })
-  } catch (err) {
-    console.error('[/api/apply-odds]', err)
-    res.status(500).json({ error: err.message })
-  }
-})
-
-// GET /api/predictions
-app.get('/api/predictions', (req, res) => {
-  try {
-    res.json({ predictions: getPredictions(db) })
-  } catch (err) {
-    res.status(500).json({ error: err.message })
-  }
-})
-
-// GET /api/best-bets?date=YYYY-MM-DD&type=greyhound|horse&mode=safest|value|longshot
 app.get('/api/best-bets', async (req, res) => {
-  const { date, type, mode } = req.query
-  if (!date || !type || !mode) {
-    return res.status(400).json({ error: 'date, type, and mode are required' })
+  const date = req.query.date
+  const type = req.query.type || 'greyhound'
+
+  if (!date) {
+    return res.status(400).json({ error: 'date is required' })
   }
 
   if (!['greyhound', 'horse'].includes(type)) {
     return res.status(400).json({ error: 'type must be greyhound or horse' })
   }
 
-  if (!['safest', 'value', 'longshot'].includes(mode)) {
-    return res.status(400).json({ error: 'mode must be safest, value, or longshot' })
-  }
-
   try {
-    const { cached, active } = getOrStartBestBetsScan({ date, type, mode })
+    const { cached, active } = getOrStartBestBetsScan({ date, type })
     if (cached) {
       res.set('X-Scan-Duration-Ms', String(cached.scanDurationMs || 0))
       return res.json(cached)
@@ -664,26 +387,23 @@ app.get('/api/best-bets', async (req, res) => {
     const payload = await active.promise
     const { type: eventType, ...responsePayload } = payload
     res.set('X-Scan-Duration-Ms', String(responsePayload.scanDurationMs || 0))
-    res.json(responsePayload)
+    return res.json(responsePayload)
   } catch (err) {
     console.error('[/api/best-bets]', err)
-    res.status(500).json({ error: err.message })
+    return res.status(500).json({ error: err.message })
   }
 })
 
-// GET /api/best-bets/stream?date=YYYY-MM-DD&type=greyhound|horse&mode=safest|value|longshot
 app.get('/api/best-bets/stream', async (req, res) => {
-  const { date, type, mode } = req.query
-  if (!date || !type || !mode) {
-    return res.status(400).json({ error: 'date, type, and mode are required' })
+  const date = req.query.date
+  const type = req.query.type || 'greyhound'
+
+  if (!date) {
+    return res.status(400).json({ error: 'date is required' })
   }
 
   if (!['greyhound', 'horse'].includes(type)) {
     return res.status(400).json({ error: 'type must be greyhound or horse' })
-  }
-
-  if (!['safest', 'value', 'longshot'].includes(mode)) {
-    return res.status(400).json({ error: 'mode must be safest, value, or longshot' })
   }
 
   res.setHeader('Content-Type', 'text/event-stream')
@@ -691,7 +411,7 @@ app.get('/api/best-bets/stream', async (req, res) => {
   res.setHeader('Connection', 'keep-alive')
   res.flushHeaders?.()
 
-  const { cached, active } = getOrStartBestBetsScan({ date, type, mode })
+  const { cached, active } = getOrStartBestBetsScan({ date, type })
   if (cached) {
     sendSse(res, { type: 'complete', ...cached })
     return res.end()
@@ -718,75 +438,122 @@ app.get('/api/best-bets/stream', async (req, res) => {
   }
 })
 
-// GET /api/pending
-app.get('/api/pending', (req, res) => {
-  try {
-    res.json({ predictions: getPendingPredictions(db) })
-  } catch (err) {
-    res.status(500).json({ error: err.message })
-  }
-})
-
-// PATCH /api/predictions/:id
-app.patch('/api/predictions/:id', (req, res) => {
-  const id = parseInt(req.params.id, 10)
-  if (!Number.isInteger(id) || id < 1) {
-    return res.status(400).json({ error: 'id must be a positive integer' })
-  }
-  const { result, odds } = req.body
-  if (!result || !['win', 'loss', 'scratched'].includes(result)) {
-    return res.status(400).json({ error: 'result must be win, loss, or scratched' })
-  }
-  try {
-    const updated = updateResult(db, id, result, odds ?? null)
-    if (!updated) return res.status(404).json({ error: 'Prediction not found' })
-    res.json({ prediction: updated })
-  } catch (err) {
-    res.status(500).json({ error: err.message })
-  }
-})
-
-// GET /api/stats
-app.get('/api/stats', (req, res) => {
-  try {
-    res.json(getStats(db))
-  } catch (err) {
-    res.status(500).json({ error: err.message })
-  }
-})
-
-// GET /api/stats/advanced
-app.get('/api/stats/advanced', (req, res) => {
+app.get('/api/bets', (req, res) => {
   try {
     res.json({
-      byTrack: getStatsByTrack(db),
-      byGrade: getStatsByGrade(db),
-      byBox: getStatsByBox(db),
-      byMonth: getStatsByMonth(db),
-      calibration: getCalibrationData(db),
-      streaks: getStreakData(db),
-      profitCurve: getProfitCurve(db),
+      bets: getPredictions(db).map(formatBetResponse),
+      summary: getBetLedgerSummary(db),
     })
   } catch (err) {
     res.status(500).json({ error: err.message })
   }
 })
 
-// GET /api/briefing?date=YYYY-MM-DD
-app.get('/api/briefing', (req, res) => {
-  const date = req.query.date || getCurrentDateString()
+app.post('/api/bets', (req, res) => {
+  const {
+    date,
+    track,
+    raceNumber,
+    raceType = 'greyhound',
+    raceGrade = null,
+    raceDistance = null,
+    runnerName,
+    box = null,
+    mode,
+    confidence,
+    stake,
+    confirmedOdds,
+    oddsSource = 'confirmed',
+    winProbability = null,
+    ev = null,
+    expectedReturn = null,
+  } = req.body || {}
+
+  if (!date || !track || !runnerName || !mode) {
+    return res.status(400).json({ error: 'date, track, raceNumber, runnerName, and mode are required' })
+  }
+
+  if (!Number.isInteger(Number(raceNumber)) || Number(raceNumber) < 1) {
+    return res.status(400).json({ error: 'raceNumber must be a positive integer' })
+  }
+
+  if (!['greyhound', 'horse'].includes(raceType)) {
+    return res.status(400).json({ error: 'raceType must be greyhound or horse' })
+  }
+
+  if (!['safest', 'value', 'longshot'].includes(mode)) {
+    return res.status(400).json({ error: 'mode must be safest, value, or longshot' })
+  }
+
+  const parsedStake = parsePositiveNumber(stake)
+  const parsedOdds = parsePositiveNumber(confirmedOdds)
+  const parsedConfidence = parseOptionalNumber(confidence)
+
+  if (parsedStake == null) {
+    return res.status(400).json({ error: 'stake must be a positive number' })
+  }
+
+  if (parsedOdds == null) {
+    return res.status(400).json({ error: 'confirmedOdds must be a positive number' })
+  }
+
+  if (parsedConfidence == null) {
+    return res.status(400).json({ error: 'confidence must be numeric' })
+  }
 
   try {
-    res.json(getDailyBriefing(db, date, {
-      upcomingRaces: getBriefingUpcomingRaces(date),
-    }))
+    const bet = savePrediction(db, {
+      date,
+      track,
+      race_number: Number(raceNumber),
+      race_type: raceType,
+      race_grade: raceGrade,
+      race_distance: parseOptionalNumber(raceDistance),
+      runner: runnerName,
+      box_barrier: parseOptionalNumber(box),
+      mode,
+      confidence: parsedConfidence,
+      stake: parsedStake,
+      odds: parsedOdds,
+      odds_source: oddsSource,
+      win_probability: parseOptionalNumber(winProbability),
+      ev: parseOptionalNumber(ev),
+      expected_return: parseOptionalNumber(expectedReturn),
+      record_kind: 'placed_bet',
+      placed_at: new Date().toISOString(),
+    })
+
+    res.status(201).json({ bet: formatBetResponse(bet) })
   } catch (err) {
-    console.error('[/api/briefing]', err)
+    console.error('[/api/bets]', err)
     res.status(500).json({ error: err.message })
   }
 })
 
-// POST /api/check-results
+app.patch('/api/bets/:id', (req, res) => {
+  const id = Number(req.params.id)
+  const { result, odds } = req.body || {}
+
+  if (!Number.isInteger(id) || id < 1) {
+    return res.status(400).json({ error: 'id must be a positive integer' })
+  }
+
+  if (!['win', 'loss', 'scratched'].includes(result)) {
+    return res.status(400).json({ error: 'result must be win, loss, or scratched' })
+  }
+
+  try {
+    const updated = updateResult(db, id, result, result === 'win' ? parsePositiveNumber(odds) : null)
+    if (!updated) {
+      return res.status(404).json({ error: 'Bet not found' })
+    }
+
+    res.json({ bet: formatBetResponse(updated) })
+  } catch (err) {
+    res.status(500).json({ error: err.message })
+  }
+})
+
 app.post('/api/check-results', async (req, res) => {
   try {
     const summary = await runPendingResultCheck()
@@ -797,90 +564,11 @@ app.post('/api/check-results', async (req, res) => {
   }
 })
 
-// GET /api/scraper-health
-app.get('/api/scraper-health', (req, res) => {
-  try {
-    res.json({ sources: getScraperStats(db) })
-  } catch (err) {
-    res.status(500).json({ error: err.message })
-  }
-})
-
-// GET /api/box-bias?track=<name>&distance=<meters>
-app.get('/api/box-bias', (req, res) => {
-  const { track, distance } = req.query
-  const numericDistance = Number(distance)
-  if (!track || !Number.isFinite(numericDistance)) {
-    return res.status(400).json({ error: 'track and numeric distance are required' })
-  }
-
-  try {
-    const stats = getBoxBiasStats(db, track, numericDistance)
-    const hasFullEmpiricalCoverage = stats &&
-      stats.boxes.length === 8 &&
-      stats.boxes.every(box => box.total_predictions >= 10)
-
-    if (!hasFullEmpiricalCoverage) {
-      const defaults = getDefaultBoxBiasTable(numericDistance)
-      return res.json({
-        source: 'default',
-        message: 'insufficient data',
-        track,
-        distance: numericDistance,
-        boxes: defaults.boxes.map(box => ({
-          box: box.box,
-          total_predictions: 0,
-          win_count: 0,
-          win_rate_pct: box.win_rate_pct,
-        })),
-      })
-    }
-
-    res.json({
-      source: 'empirical',
-      track,
-      distance: numericDistance,
-      boxes: stats.boxes,
-    })
-  } catch (err) {
-    res.status(500).json({ error: err.message })
-  }
-})
-
-// GET /api/journal?limit=20
-app.get('/api/journal', (req, res) => {
-  const limit = Number(req.query.limit) || 20
-  try {
-    res.json({ entries: getJournalHistory(db, limit) })
-  } catch (err) {
-    res.status(500).json({ error: err.message })
-  }
-})
-
-// GET /api/journal/:predictionId
-app.get('/api/journal/:predictionId', (req, res) => {
-  const predictionId = Number(req.params.predictionId)
-  if (!Number.isInteger(predictionId) || predictionId < 1) {
-    return res.status(400).json({ error: 'predictionId must be a positive integer' })
-  }
-
-  try {
-    const entry = getJournalEntry(db, predictionId)
-    if (!entry) return res.status(404).json({ error: 'Journal entry not found' })
-    res.json({ entry })
-  } catch (err) {
-    res.status(500).json({ error: err.message })
-  }
-})
-
 const resultCheckInterval = setInterval(async () => {
   try {
     if (getPendingPredictions(db).length === 0) return
     const summary = await runPendingResultCheck()
-    console.log(`[RaceEdge Results] ${formatResultCheckSummary(summary)}`)
-    if (summary.errors.length > 0) {
-      console.log('[RaceEdge Results] Errors:', summary.errors)
-    }
+    console.log(`[RaceEdge Results] checked=${summary.checked}, resolved=${summary.resolved}, stillPending=${summary.stillPending}, errors=${summary.errors.length}`)
   } catch (err) {
     console.error('[RaceEdge Results] Scheduled check failed:', err.message)
   }
@@ -898,12 +586,13 @@ async function shutdown() {
   await closeAppResources()
   process.exit(0)
 }
+
 process.on('SIGTERM', shutdown)
-process.on('SIGINT',  shutdown)
+process.on('SIGINT', shutdown)
 
 if (process.env.NODE_ENV === 'production') {
   app.get('*', (req, res) => {
-    res.sendFile(path.join(__dirname, '..', 'dist', 'index.html'))
+    res.sendFile(path.join(CLIENT_DIST_PATH, 'index.html'))
   })
 }
 
@@ -920,5 +609,5 @@ module.exports = {
   db,
   startServer,
   closeAppResources,
-  handleResearchRequest,
+  executeBestBetsScan,
 }

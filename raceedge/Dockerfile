@@ -1,4 +1,17 @@
-FROM node:20-slim
+FROM node:20-slim AS build
+
+ENV PUPPETEER_SKIP_CHROMIUM_DOWNLOAD=true
+
+WORKDIR /app
+
+COPY package.json package-lock.json ./
+RUN npm ci
+
+COPY . .
+RUN npm run build
+
+
+FROM node:20-slim AS runtime
 
 RUN apt-get update && apt-get install -y \
     chromium \
@@ -22,11 +35,13 @@ ENV PUPPETEER_SKIP_CHROMIUM_DOWNLOAD=true \
 
 WORKDIR /app
 
-COPY package.json package-lock.json* ./
-RUN npm ci --omit=dev
+COPY package.json package-lock.json ./
+RUN npm ci --omit=dev && npm cache clean --force
 
-COPY . .
-RUN npm run build
+COPY --from=build /app/dist ./dist
+COPY shared ./shared
+COPY server ./server
+COPY .env.example ./.env.example
 
 EXPOSE 3001
 

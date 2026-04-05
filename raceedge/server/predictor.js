@@ -689,6 +689,8 @@ function generateBestBets(allRaces) {
           allRunners: prediction.allRunners,
           runner: pick.runnerData,
           boxBiasSource: pick.boxBiasSource,
+          sourcesUsed: Array.isArray(race.sourcesUsed) ? race.sourcesUsed : [],
+          sourcesSkipped: Array.isArray(race.sourcesSkipped) ? race.sourcesSkipped : [],
         }
       })
       .filter(Boolean)
@@ -709,7 +711,7 @@ function generateBestBets(allRaces) {
             ((left.raceNumber || 0) - (right.raceNumber || 0))
           )
       ))
-      .slice(0, 3)
+      .slice(0, 5)
       .map((pick, index) => ({
         rank: index + 1,
         ...pick,

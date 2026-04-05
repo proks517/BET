@@ -30,7 +30,7 @@ const raceContext = {
 }
 
 describe('analyseRace', () => {
-  test('returns null gracefully when API key is not set', async () => {
+  test('returns null when AI is disabled and no API key is set', async () => {
     const originalKey = process.env.ANTHROPIC_API_KEY
     delete process.env.ANTHROPIC_API_KEY
 
@@ -46,7 +46,7 @@ describe('analyseRace', () => {
     }
   })
 
-  test('returns null gracefully even when an API key is present', async () => {
+  test('returns null when AI is disabled even if an API key is present', async () => {
     const originalKey = process.env.ANTHROPIC_API_KEY
     process.env.ANTHROPIC_API_KEY = 'test-key'
 

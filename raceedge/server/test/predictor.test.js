@@ -440,14 +440,14 @@ describe('generateBestBets', () => {
     }
   }
 
-  test('returns the top 3 ranked picks for each mode', () => {
-    const races = Array.from({ length: 4 }, (_, index) => buildRace(index + 1))
+  test('returns the top 5 ranked picks for each mode when enough races are available', () => {
+    const races = Array.from({ length: 6 }, (_, index) => buildRace(index + 1))
     const picks = generateBestBets(races)
 
     assert.deepEqual(Object.keys(picks), ['safest', 'value', 'longshot'])
-    assert.equal(picks.safest.length, 3)
-    assert.equal(picks.value.length, 3)
-    assert.equal(picks.longshot.length, 3)
+    assert.equal(picks.safest.length, 5)
+    assert.equal(picks.value.length, 5)
+    assert.equal(picks.longshot.length, 5)
 
     for (let index = 1; index < picks.safest.length; index += 1) {
       assert.ok(picks.safest[index - 1].winProbability >= picks.safest[index].winProbability)
@@ -492,5 +492,17 @@ describe('generateBestBets', () => {
     assert.ok(picks.value[0].breakdown)
     assert.equal(typeof picks.value[0].confidence, 'number')
     assert.ok('winProbability' in picks.value[0])
+  })
+
+  test('carries source usage metadata into each ranked pick', () => {
+    const picks = generateBestBets([buildRace(2, {
+      race: {
+        sourcesUsed: ['thedogs.com.au', 'grv.org.au'],
+        sourcesSkipped: [{ source: 'tab.com.au', reason: 'timeout' }],
+      },
+    })])
+
+    assert.deepEqual(picks.value[0].sourcesUsed, ['thedogs.com.au', 'grv.org.au'])
+    assert.deepEqual(picks.value[0].sourcesSkipped, [{ source: 'tab.com.au', reason: 'timeout' }])
   })
 })
